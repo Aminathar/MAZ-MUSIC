@@ -1,0 +1,1360 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>MAZ</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link
+    href="https://fonts.googleapis.com/css2?family=Circular+Std:wght@400;500;700;900&family=Inter:wght@400;500;600;700&display=swap"
+    rel="stylesheet">
+  <!-- Fallback since Circular isn't on Google Fonts -->
+  <link
+    href="https://fonts.googleapis.com/css2?family=Figtree:wght@400;500;600;700;800;900&family=Inter:wght@400;500;600&display=swap"
+    rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans:wght@400;500;600;700;800;900&display=swap"
+    rel="stylesheet">
+  <!-- Terminal skin fonts -->
+  <link href="https://fonts.googleapis.com/css2?family=VT323&family=Share+Tech+Mono&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/style.css" />
+  <!-- Skin init: runs before first paint to prevent flash -->
+  <script>
+    (function() {
+      var skin = localStorage.getItem('maz_skin') || 'default';
+      if (skin !== 'default') document.documentElement.setAttribute('data-skin', skin);
+    })();
+  </script>
+</head>
+
+<body>
+
+  <!-- ══ MUSIC NOTES OVERLAY ══════════════════════════════════ -->
+  <div class="music-bg" aria-hidden="true">
+    <span class="music-note" style="left:3%;--dur:14s;--delay:0s;font-size:28px;">♪</span>
+    <span class="music-note" style="left:8%;--dur:11s;--delay:3s;font-size:18px;">♫</span>
+    <span class="music-note" style="left:15%;--dur:16s;--delay:1s;font-size:22px;">♩</span>
+    <span class="music-note" style="left:22%;--dur:13s;--delay:5s;font-size:32px;">♬</span>
+    <span class="music-note" style="left:31%;--dur:15s;--delay:2s;font-size:16px;">♪</span>
+    <span class="music-note" style="left:40%;--dur:12s;--delay:7s;font-size:26px;">♭</span>
+    <span class="music-note" style="left:48%;--dur:18s;--delay:0.5s;font-size:20px;">♫</span>
+    <span class="music-note" style="left:55%;--dur:10s;--delay:4s;font-size:24px;">♩</span>
+    <span class="music-note" style="left:63%;--dur:14s;--delay:6s;font-size:18px;">♬</span>
+    <span class="music-note" style="left:70%;--dur:17s;--delay:1.5s;font-size:28px;">♪</span>
+    <span class="music-note" style="left:77%;--dur:11s;--delay:8s;font-size:22px;">♯</span>
+    <span class="music-note" style="left:83%;--dur:15s;--delay:3.5s;font-size:20px;">♫</span>
+    <span class="music-note" style="left:90%;--dur:13s;--delay:2.5s;font-size:30px;">♩</span>
+    <span class="music-note" style="left:95%;--dur:16s;--delay:6.5s;font-size:16px;">♪</span>
+    <span class="music-note" style="left:12%;--dur:19s;--delay:9s;font-size:24px;">♬</span>
+    <span class="music-note" style="left:36%;--dur:12s;--delay:10s;font-size:20px;">♭</span>
+    <span class="music-note" style="left:58%;--dur:14s;--delay:11s;font-size:26px;">♮</span>
+    <span class="music-note" style="left:75%;--dur:10s;--delay:4.5s;font-size:18px;">♩</span>
+    <span class="music-note" style="left:27%;--dur:17s;--delay:13s;font-size:22px;">♫</span>
+    <span class="music-note" style="left:45%;--dur:15s;--delay:15s;font-size:28px;">♬</span>
+  </div>
+
+  <!-- ══ SIDEBAR ══════════════════════════════════════════════ -->
+  <nav class="sidebar">
+    <div class="sidebar-logo">
+      <svg class="sf-logo-icon" viewBox="0 0 32 32" fill="none">
+        <path d="M16 2L28 8.5V23.5L16 30L4 23.5V8.5L16 2Z" fill="white" fill-opacity="0.9" />
+        <path d="M11 13v6M14 11v10M17 13v6M20 11v10" stroke="#121212" stroke-width="2" stroke-linecap="round" />
+      </svg>
+      <span class="sf-logo-text">MAZ</span>
+    </div>
+
+    <div class="sidebar-section">
+      <button class="sidebar-item active" data-view="studio">
+        <svg viewBox="0 0 24 24" fill="none">
+          <path d="M3 9l9-7 9 7v11a2 2 0 01-2 2H5a2 2 0 01-2-2z" stroke="currentColor" stroke-width="2"
+            stroke-linecap="round" stroke-linejoin="round" />
+        </svg>
+        <span data-i18n="nav_studio">Studio</span>
+      </button>
+      <button class="sidebar-item" data-view="library">
+        <svg viewBox="0 0 24 24" fill="none">
+          <path d="M3 18V6l9 6-9 6zM15 6h6M15 12h6M15 18h6" stroke="currentColor" stroke-width="2"
+            stroke-linecap="round" stroke-linejoin="round" />
+        </svg>
+        <span data-i18n="nav_library">My Library</span>
+      </button>
+      <button class="sidebar-item" data-view="evaluate">
+        <svg viewBox="0 0 24 24" fill="none">
+          <path
+            d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"
+            stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+        </svg>
+        <span data-i18n="nav_evaluate">Evaluate</span>
+      </button>
+      <button class="sidebar-item" data-view="voice">
+        <svg viewBox="0 0 24 24" fill="none">
+          <path d="M12 1a3 3 0 00-3 3v8a3 3 0 006 0V4a3 3 0 00-3-3z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+          <path d="M19 10v2a7 7 0 01-14 0v-2M12 19v4M8 23h8" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        <span data-i18n="nav_voice">Voice</span>
+      </button>
+      <button class="sidebar-item" data-view="train">
+        <svg viewBox="0 0 24 24" fill="none">
+          <path d="M12 2L2 7l10 5 10-5-10-5z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+          <path d="M2 17l10 5 10-5M2 12l10 5 10-5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        <span data-i18n="nav_train">Train Voice</span>
+      </button>
+    </div>
+
+    <div class="sidebar-divider"></div>
+
+    <!-- Interface language switcher -->
+    <div class="sidebar-section">
+      <div class="lang-switcher">
+        <button class="lang-switch-btn active" data-lang="en">EN</button>
+        <button class="lang-switch-btn" data-lang="kk">KK</button>
+        <button class="lang-switch-btn" data-lang="ru">RU</button>
+      </div>
+    </div>
+
+    <div class="sidebar-divider"></div>
+
+    <div class="sidebar-section">
+      <button class="theme-toggle-btn" id="btn-theme">
+        <!-- Moon icon: shown in dark mode -->
+        <svg class="theme-icon-moon" viewBox="0 0 24 24" fill="none">
+          <path d="M21 12.79A9 9 0 1111.21 3a7 7 0 009.79 9.79z" stroke="currentColor" stroke-width="2"
+            stroke-linecap="round" stroke-linejoin="round" />
+        </svg>
+        <!-- Sun icon: shown in light mode -->
+        <svg class="theme-icon-sun" viewBox="0 0 24 24" fill="none">
+          <circle cx="12" cy="12" r="5" stroke="currentColor" stroke-width="2" />
+          <path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"
+            stroke="currentColor" stroke-width="2" stroke-linecap="round" />
+        </svg>
+        <span class="theme-label-light" data-i18n="theme_light">Light mode</span>
+        <span class="theme-label-dark"  data-i18n="theme_dark">Dark mode</span>
+      </button>
+    </div>
+
+    <div class="sidebar-divider"></div>
+
+    <!-- Skin picker -->
+    <div class="sidebar-section">
+      <div class="skin-picker">
+        <span class="skin-picker-label" data-i18n="skin_label">Skin</span>
+        <div class="skin-picker-opts">
+          <button class="skin-opt active" data-skin="default">
+            <span class="skin-swatch skin-swatch--default"></span>
+            <span data-i18n="skin_default">Default</span>
+          </button>
+          <button class="skin-opt" data-skin="terminal-dark">
+            <span class="skin-swatch skin-swatch--terminal-dark"></span>
+            <span data-i18n="skin_amber">Amber</span>
+          </button>
+          <button class="skin-opt" data-skin="terminal-paper">
+            <span class="skin-swatch skin-swatch--terminal-paper"></span>
+            <span data-i18n="skin_paper">Paper</span>
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <div class="sidebar-divider"></div>
+
+    <div class="sidebar-section sidebar-status-section">
+      <div class="status-row">
+        <div class="status-dot-wrap">
+          <span class="status-dot" id="status-dot"></span>
+        </div>
+        <span class="status-text" id="status-text">Connecting…</span>
+      </div>
+
+    </div>
+  </nav>
+
+  <!-- ══ MAIN ════════════════════════════════════════════════ -->
+  <div class="main">
+
+    <!-- STUDIO PAGE -->
+    <div class="page active" id="page-studio">
+      <div class="studio-layout">
+
+        <!-- LEFT: Form -->
+        <div class="studio-form">
+
+          <!-- Page heading -->
+          <div class="page-heading">
+            <h1 data-i18n="studio_title">Create</h1>
+            <p class="page-sub" data-i18n="studio_sub">Describe your track, add lyrics, hit generate</p>
+          </div>
+
+          <!-- Music description -->
+          <div class="field-group" style="position:relative">
+            <div class="field-label-row">
+              <label class="field-label"><span data-i18n="label_description">Music description</span></label>
+              <div style="display:flex;align-items:center;gap:8px">
+              <button class="hist-btn" id="btn-prompt-hist" title="Recent prompts">
+                <svg viewBox="0 0 16 16" fill="none" width="13" height="13"><circle cx="8" cy="8" r="6.5" stroke="currentColor" stroke-width="1.3"/><path d="M8 5v3.5l2 2" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>
+                History
+              </button>
+              <button class="ai-btn" id="btn-enhance">
+                <svg viewBox="0 0 16 16" fill="none">
+                  <path d="M8 1l1.5 5H15l-4.5 3.3 1.7 5.2L8 11.3l-4.2 3.2 1.7-5.2L1 6h5.5L8 1z" stroke="currentColor"
+                    stroke-width="1.2" stroke-linejoin="round" />
+                </svg>
+                <span data-i18n="btn_enhance">Enhance with AI</span>
+              </button>
+              </div>
+            </div>
+            <div class="hist-dropdown hidden" id="prompt-hist-dropdown"></div>
+            <textarea id="prompt" class="textarea" rows="4"
+              placeholder="Describe the music… genre, mood, instruments, era, energy level…"></textarea>
+            <span class="field-hint"><span id="char-count">0</span> / 2000</span>
+          </div>
+
+          <!-- Lyrics -->
+          <div class="field-group" style="position:relative">
+            <div class="field-label-row">
+              <label class="field-label"><span data-i18n="label_lyrics">Lyrics</span> <span class="label-muted"
+                  data-i18n="label_optional">optional</span></label>
+              <div style="display:flex;align-items:center;gap:8px">
+                <button class="hist-btn" id="btn-lyrics-hist" title="Recent lyrics">
+                  <svg viewBox="0 0 16 16" fill="none" width="13" height="13"><circle cx="8" cy="8" r="6.5" stroke="currentColor" stroke-width="1.3"/><path d="M8 5v3.5l2 2" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>
+                  History
+                </button>
+                <div class="lang-selector" id="lang-selector">
+                  <button class="lang-btn active" data-lang="en" title="English">EN</button>
+                  <button class="lang-btn" data-lang="kk" title="Kazakh">KZ</button>
+                  <button class="lang-btn" data-lang="ru" title="Russian">RU</button>
+                  <button class="lang-btn" data-lang="tr" title="Turkish">TR</button>
+                  <button class="lang-btn" data-lang="custom" title="Other language">+</button>
+                </div>
+                <input id="custom-lang-input" class="input lang-custom-input hidden" type="text" placeholder="Language…" maxlength="40" autocomplete="off" />
+                <button class="ai-btn" id="btn-write-lyrics">
+                  <svg viewBox="0 0 16 16" fill="none">
+                    <path d="M2 4h12M2 8h8M2 12h5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" />
+                  </svg>
+                  <span data-i18n="btn_write_ai">Write with AI</span>
+                </button>
+              </div>
+            </div>
+            <div class="hist-dropdown hidden" id="lyrics-hist-dropdown"></div>
+            <div class="lyrics-gen-row hidden" id="lyrics-gen-row">
+              <input id="lyrics-theme" class="input" type="text" placeholder="Theme or story idea…" />
+              <button class="btn-go" id="btn-gen-lyrics">Generate</button>
+            </div>
+            <textarea id="lyrics" class="textarea textarea--code" rows="7"
+              placeholder="[Verse 1]&#10;Your lyrics here…&#10;&#10;[Chorus]&#10;Section tags give best results"></textarea>
+          </div>
+
+          <!-- Style tags -->
+          <div class="field-group">
+            <div class="field-label-row">
+              <label class="field-label"><span data-i18n="label_style">Style</span></label>
+              <span class="label-muted small" data-i18n="style_hint">tap to add</span>
+            </div>
+            <div class="tag-cloud" id="tag-cloud">
+              <button class="tag" data-style="cinematic">cinematic</button>
+              <button class="tag" data-style="lo-fi">lo-fi</button>
+              <button class="tag" data-style="electronic">electronic</button>
+              <button class="tag" data-style="jazz">jazz</button>
+              <button class="tag" data-style="ambient">ambient</button>
+              <button class="tag" data-style="acoustic">acoustic</button>
+              <button class="tag" data-style="orchestral">orchestral</button>
+              <button class="tag" data-style="hip-hop">hip-hop</button>
+              <button class="tag" data-style="pop">pop</button>
+              <button class="tag" data-style="rock">rock</button>
+              <button class="tag" data-style="R&B">R&amp;B</button>
+              <button class="tag" data-style="folk">folk</button>
+              <button class="tag" data-style="metal">metal</button>
+              <button class="tag" data-style="classical">classical</button>
+              <button class="tag" data-style="synthwave">synthwave</button>
+              <button class="tag" data-style="trap">trap</button>
+              <button class="tag" data-style="dreamy">dreamy</button>
+              <button class="tag" data-style="dark">dark</button>
+            </div>
+          </div>
+
+          <!-- Parameters -->
+          <div class="field-group">
+            <label class="field-label"><span data-i18n="label_parameters">Parameters</span></label>
+            <div class="sliders-grid">
+              <div class="slider-row">
+                <div class="slider-labels"><span><span data-i18n="param_duration">Duration</span><span
+                      class="slider-val" id="dur-val">60s</span></div>
+                <label class="auto-dur-label" id="auto-dur-label" title="Let the AI model determine duration from your lyrics (more accurate than a fixed estimate)">
+                  <input type="checkbox" id="auto-duration" />
+                  <span data-i18n="auto_duration">Auto</span>
+                </label>
+                <input class="slider" type="range" id="duration" min="10" max="480" value="60" step="5" />
+                <div class="slider-ends"><span>10s</span><span>8 min</span></div>
+              </div>
+              <div class="slider-row">
+                <div class="slider-labels"><span><span data-i18n="param_guidance">Guidance</span><span
+                      class="slider-val" id="guid-val">7.5</span></div>
+                <input class="slider" type="range" id="guidance" min="1" max="20" value="7.5" step="0.5" />
+                <div class="slider-ends"><span data-i18n="range_creative">creative</span><span
+                    data-i18n="range_strict">strict</span></div>
+              </div>
+              <div class="slider-row">
+                <div class="slider-labels"><span><span data-i18n="param_steps">Steps</span><span class="slider-val"
+                      id="steps-val">30</span></div>
+                <input class="slider" type="range" id="steps" min="10" max="100" value="30" step="5" />
+                <div class="slider-ends"><span data-i18n="range_fast">fast</span><span
+                    data-i18n="range_quality">quality</span></div>
+              </div>
+            </div>
+            <div class="mini-row">
+              <div class="mini-field">
+                <label><span data-i18n="param_bpm">BPM</span></label>
+                <input class="input input--mini" type="number" id="bpm" placeholder="auto" min="40" max="300" />
+              </div>
+              <div class="mini-field">
+                <label><span data-i18n="param_key">Key</span></label>
+                <input class="input input--mini" type="text" id="key" placeholder="auto" />
+              </div>
+              <div class="mini-field">
+                <label><span data-i18n="param_seed">Seed</span></label>
+                <div class="mini-seed">
+                  <input class="input input--mini" type="number" id="seed" placeholder="random" />
+                  <button class="btn-dice" id="btn-rand" title="Random">&#x2684;</button>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Generate -->
+          <div class="generate-block">
+
+            <button class="btn-generate" id="btn-generate">
+              <span id="gen-idle">
+                <svg viewBox="0 0 24 24" fill="none" style="width:20px;height:20px">
+                  <polygon points="5,3 19,12 5,21" fill="currentColor" />
+                </svg>
+                <span data-i18n="btn_generate">Generate Track</span>
+              </span>
+              <span id="gen-busy" class="hidden">
+                <span class="spin"></span>
+                <span id="gen-label">Generating…</span>
+              </span>
+            </button>
+            <button class="btn-cancel-gen hidden" id="btn-cancel-gen" type="button"><span data-i18n="btn_cancel">Cancel</span></button>
+
+            <!-- Voice clone toggle -->
+            <div class="voice-toggle-row">
+              <label class="voice-toggle-label">
+                <input type="checkbox" id="voice-toggle" class="voice-toggle-checkbox" />
+                <span class="voice-toggle-switch"></span>
+                <svg viewBox="0 0 24 24" fill="none" width="15" height="15" style="flex-shrink:0">
+                  <path d="M12 1a3 3 0 00-3 3v8a3 3 0 006 0V4a3 3 0 00-3-3z" fill="currentColor" opacity=".8"/>
+                  <path d="M19 10v2a7 7 0 01-14 0v-2M12 19v4M8 23h8" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                </svg>
+                <span data-i18n="voice_toggle_label">Sing in my voice</span>
+              </label>
+              <select id="voice-profile-select" class="voice-profile-select hidden">
+                <option value="">Select voice…</option>
+              </select>
+            </div>
+          </div>
+
+        </div>
+
+        <!-- RIGHT: Player + sidebar cards -->
+        <div class="studio-right">
+
+
+
+          <!-- VIDEO TAB -->
+          <div class="right-tab-panel hidden" id="panel-video">
+
+            <!-- State 1: No track yet -->
+            <div class="vp-state" id="vp-no-track">
+              <div class="vp-placeholder">
+                <div class="vp-placeholder-icon">
+                  <svg viewBox="0 0 48 48" fill="none">
+                    <rect x="4" y="10" width="30" height="22" rx="4" stroke="currentColor" stroke-width="2"
+                      stroke-opacity=".3" />
+                    <path d="M34 18l10-5v18l-10-5" stroke="currentColor" stroke-width="2" stroke-opacity=".3"
+                      stroke-linecap="round" />
+                  </svg>
+                </div>
+                <p class="vp-placeholder-title" data-i18n="video_no_track">No track yet</p>
+                <p class="vp-placeholder-sub" data-i18n="video_no_track_sub">Generate a music track first, then come back here to make a video.</p>
+              </div>
+            </div>
+
+            <!-- State 2: Ready to generate -->
+            <div class="vp-state hidden" id="vp-ready">
+              <div class="vp-ready-content">
+                <div class="vp-section-header">
+                  <h3 class="vp-title" data-i18n="video_title">AI Video Generation</h3>
+                  <p class="vp-sub" data-i18n="video_sub">Wan2.1 will generate a cinematic clip for each lyric section, then stitch them with
+                    your audio.</p>
+                </div>
+
+                <div class="vp-sections-list" id="vp-sections-list">
+                  <!-- Populated by JS -->
+                </div>
+
+                <div class="vp-wan-check" id="vp-wan-check">
+                  <span class="vp-wan-dot" id="vp-wan-dot"></span>
+                  <span id="vp-wan-label">Checking Wan2.1...</span>
+                </div>
+
+                <button class="btn-gen-video" id="btn-gen-video">
+                  <svg viewBox="0 0 20 20" fill="none">
+                    <polygon points="4,3 18,10 4,17" fill="currentColor" />
+                  </svg>
+                  <span data-i18n="btn_gen_video">Generate Video</span>
+                </button>
+              </div>
+            </div>
+
+            <!-- State 3: Generating -->
+            <div class="vp-state hidden" id="vp-generating">
+              <div class="vp-progress-content">
+                <h3 class="vp-title" data-i18n="video_generating">Generating Video</h3>
+                <p class="vp-sub" id="vp-progress-sub">Starting...</p>
+                <div class="vp-clips-list" id="vp-clips-list">
+                  <!-- Populated by JS -->
+                </div>
+                <div class="vp-overall-bar">
+                  <div class="vp-overall-fill" id="vp-overall-fill"></div>
+                </div>
+                <p class="vp-overall-label" id="vp-overall-label">0 / 0 clips</p>
+              </div>
+            </div>
+
+            <!-- State 4: Done — video player -->
+            <div class="vp-state hidden" id="vp-done">
+              <div class="vp-player-content">
+                <video id="vp-video" class="vp-video" controls playsinline>
+                  Your browser does not support video.
+                </video>
+                <div class="vp-done-actions">
+                  <button class="np-action" id="btn-dl-video">
+                    <svg viewBox="0 0 20 20" fill="none">
+                      <path d="M10 3v10M7 10l3 3 3-3M3 16h14" stroke="currentColor" stroke-width="1.8"
+                        stroke-linecap="round" stroke-linejoin="round" />
+                    </svg>
+                    <span data-i18n="btn_dl_mp4">Download MP4</span>
+                  </button>
+                  <button class="np-action" id="btn-play-with-video">
+                    <svg viewBox="0 0 20 20" fill="none">
+                      <polygon points="4,3 18,10 4,17" fill="currentColor" />
+                    </svg>
+                    <span data-i18n="btn_play_audio">Play with Audio</span>
+                  </button>
+                  <button class="np-action" id="btn-regen-video">
+                    <svg viewBox="0 0 20 20" fill="none">
+                      <path d="M4 10a6 6 0 1 1 2 4.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" />
+                      <path d="M4 14v-4h4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"
+                        stroke-linejoin="round" />
+                    </svg>
+                    <span data-i18n="btn_regenerate">Regenerate</span>
+                  </button>
+                </div>
+              </div>
+            </div>
+
+          </div>
+
+          <!-- Now Playing card — hero -->
+          <div class="now-playing-card" id="now-playing-card">
+
+            <div class="np-empty" id="np-empty">
+              <div class="np-empty-art">
+                <div class="pulse-rings">
+                  <span></span><span></span><span></span>
+                </div>
+                <div class="np-empty-icon">
+                  <svg viewBox="0 0 40 40" fill="none">
+                    <path d="M20 5L33 12V28L20 35L7 28V12L20 5Z" stroke="white" stroke-width="1.5"
+                      stroke-opacity="0.3" />
+                    <path d="M15 18v4M18 16v8M21 18v4M24 16v8" stroke="white" stroke-opacity="0.3" stroke-width="1.5"
+                      stroke-linecap="round" />
+                  </svg>
+                </div>
+              </div>
+              <p class="np-empty-title" data-i18n="player_empty_title">Nothing playing</p>
+              <p class="np-empty-sub" data-i18n="player_empty_sub">Your generated track will appear here</p>
+            </div>
+
+            <div class="np-loaded hidden" id="np-loaded">
+              <!-- Big album art -->
+              <div class="np-art-wrap">
+                <canvas id="np-art" width="260" height="260"></canvas>
+                <div class="np-art-overlay"></div>
+              </div>
+
+              <!-- Track info -->
+              <div class="np-info">
+                <div class="np-badge" id="np-badge" data-i18n="badge_new">NEW</div>
+                <h2 class="np-title" id="np-title">—</h2>
+                <p class="np-meta" id="np-meta">—</p>
+              </div>
+
+              <!-- Waveform -->
+              <div class="np-waveform" id="np-waveform">
+                <canvas id="wf-canvas"></canvas>
+                <div class="wf-fill" id="wf-fill"></div>
+                <div class="wf-region" id="wf-region"></div>
+                <div class="wf-ghost" id="wf-ghost"></div>
+                <div class="wf-head" id="wf-head"><div class="wf-handle"></div></div>
+                <div class="wf-tooltip" id="wf-tooltip"></div>
+                <div class="wf-region-label" id="wf-region-label"></div>
+              </div>
+
+              <!-- Transport -->
+              <div class="np-transport">
+                <span class="np-time" id="t-now">0:00</span>
+                <div class="np-controls">
+                  <button class="np-ctrl" id="btn-back">
+                    <svg viewBox="0 0 24 24" fill="none">
+                      <polygon points="19,5 5,12 19,19" fill="currentColor" opacity=".7" />
+                      <rect x="3" y="5" width="3" height="14" rx="1" fill="currentColor" />
+                    </svg>
+                  </button>
+                  <button class="np-play" id="btn-play">
+                    <svg class="play-icon" viewBox="0 0 24 24">
+                      <polygon points="6,3 20,12 6,21" fill="currentColor" />
+                    </svg>
+                    <svg class="pause-icon hidden" viewBox="0 0 24 24">
+                      <rect x="5" y="3" width="4" height="18" rx="1" fill="currentColor" />
+                      <rect x="15" y="3" width="4" height="18" rx="1" fill="currentColor" />
+                    </svg>
+                  </button>
+                  <button class="np-ctrl" id="btn-fwd">
+                    <svg viewBox="0 0 24 24" fill="none">
+                      <polygon points="5,5 19,12 5,19" fill="currentColor" opacity=".7" />
+                      <rect x="18" y="5" width="3" height="14" rx="1" fill="currentColor" />
+                    </svg>
+                  </button>
+                </div>
+                <span class="np-time" id="t-total">0:00</span>
+              </div>
+
+              <!-- Audio Analysis -->
+              <div class="analysis-card hidden" id="analysis-card">
+                <div class="analysis-loading" id="analysis-loading">
+                  <div class="analysis-dots"><span></span><span></span><span></span></div>
+                  <span data-i18n="analyzing_audio">Analyzing audio…</span>
+                </div>
+                <div class="analysis-data hidden" id="analysis-data">
+                  <div class="analysis-metrics">
+                    <div class="analysis-metric">
+                      <span class="metric-val" id="a-bpm">—</span>
+                      <span class="metric-label" data-i18n="metric_bpm">BPM</span>
+                    </div>
+                    <div class="analysis-metric">
+                      <span class="metric-val" id="a-key">—</span>
+                      <span class="metric-label" data-i18n="metric_key">Key</span>
+                    </div>
+                    <div class="analysis-metric">
+                      <span class="metric-val" id="a-mood">—</span>
+                      <span class="metric-label" data-i18n="metric_mood">Mood</span>
+                    </div>
+                    <div class="analysis-metric">
+                      <span class="metric-val" id="a-energy">—</span>
+                      <span class="metric-label" data-i18n="metric_energy">Energy</span>
+                    </div>
+                  </div>
+                  <div class="spectrum-bars">
+                    <div class="spectrum-bar-wrap">
+                      <div class="spectrum-bar-fill" id="spec-bass"></div>
+                      <span class="spectrum-bar-val" id="spec-bass-val">—</span>
+                      <span class="spectrum-bar-label" data-i18n="spectrum_bass">Bass</span>
+                    </div>
+                    <div class="spectrum-bar-wrap">
+                      <div class="spectrum-bar-fill spectrum-bar-fill--mid" id="spec-mid"></div>
+                      <span class="spectrum-bar-val" id="spec-mid-val">—</span>
+                      <span class="spectrum-bar-label" data-i18n="spectrum_mid">Mid</span>
+                    </div>
+                    <div class="spectrum-bar-wrap">
+                      <div class="spectrum-bar-fill spectrum-bar-fill--treble" id="spec-treble"></div>
+                      <span class="spectrum-bar-val" id="spec-treble-val">—</span>
+                      <span class="spectrum-bar-label" data-i18n="spectrum_treble">Treble</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Voice Sections -->
+              <div class="voice-sections-panel hidden" id="voice-sections-panel">
+                <button class="vs-header" id="vs-header" type="button">
+                  <svg viewBox="0 0 16 16" fill="none" width="13" height="13">
+                    <path d="M8 1a2 2 0 00-2 2v4a2 2 0 004 0V3a2 2 0 00-2-2z" fill="currentColor" opacity=".75"/>
+                    <path d="M12 7v1a4 4 0 01-8 0V7" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>
+                  </svg>
+                  <span>Voice Sections</span>
+                  <svg class="vs-chevron" viewBox="0 0 12 12" fill="none" width="10" height="10">
+                    <path d="M2 4l4 4 4-4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+                  </svg>
+                </button>
+                <div class="vs-body hidden" id="vs-body">
+                  <p class="vs-hint">Assign a different voice to each section of the song.</p>
+                  <div id="vs-sections-list"></div>
+                  <div class="vs-progress hidden" id="vs-progress">
+                    <div class="vs-progress-bar"><div class="vs-progress-fill" id="vs-progress-fill"></div></div>
+                    <span class="vs-progress-msg" id="vs-progress-msg">Processing…</span>
+                  </div>
+                  <button class="btn-apply-sections" id="btn-apply-sections" type="button">
+                    <svg viewBox="0 0 16 16" fill="none" width="12" height="12">
+                      <polygon points="3,2 14,8 3,14" fill="currentColor"/>
+                    </svg>
+                    Apply Voice Sections
+                  </button>
+                </div>
+              </div>
+
+              <!-- Actions -->
+              <div class="np-actions">
+                <div class="np-action-split">
+                  <button class="np-action np-action--split-main" id="btn-download">
+                    <svg viewBox="0 0 20 20" fill="none">
+                      <path d="M10 3v10M7 10l3 3 3-3M3 16h14" stroke="currentColor" stroke-width="1.8"
+                        stroke-linecap="round" stroke-linejoin="round" />
+                    </svg>
+                    <span data-i18n="btn_download">Download</span>
+                  </button>
+                  <select class="np-fmt-select" id="dl-format" title="Download format">
+                    <option value="wav">WAV</option>
+                    <option value="mp3">MP3</option>
+                    <option value="flac">FLAC</option>
+                  </select>
+                </div>
+                <button class="np-action" id="btn-stems" title="Download vocals + instrumental as ZIP">
+                  <svg viewBox="0 0 20 20" fill="none">
+                    <path d="M3 5h14M3 10h9M3 15h6" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+                  </svg>
+                  <span>Stems</span>
+                </button>
+                <button class="np-action" id="btn-master" title="Normalise to -14 LUFS + true-peak limit, download as WAV">
+                  <svg viewBox="0 0 20 20" fill="none">
+                    <path d="M3 10h3l2-6 4 12 2-6h3" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+                  </svg>
+                  <span>Normalize</span>
+                </button>
+                <button class="np-action" id="btn-save">
+                  <svg viewBox="0 0 20 20" fill="none">
+                    <path d="M10 2l2 6h6.5l-5.3 3.8 2 6.2L10 14l-5.2 4 2-6.2L1.5 8H8L10 2z" stroke="currentColor"
+                      stroke-width="1.5" stroke-linejoin="round" />
+                  </svg>
+                  <span data-i18n="btn_save">Save</span>
+                </button>
+              </div>
+            </div>
+          </div>
+
+
+
+          <!-- Queue card -->
+          <div class="side-card">
+            <div class="side-card-head">
+              <span data-i18n="queue_title">Queue</span>
+              <span class="q-badge" id="q-badge">idle</span>
+            </div>
+            <div class="side-card-body" id="q-body">
+              <span class="side-empty" data-i18n="queue_idle">No active generation</span>
+            </div>
+          </div>
+
+          <!-- Log card -->
+          <div class="side-card">
+            <div class="side-card-head">
+              <span data-i18n="activity_title">Activity</span>
+              <button class="side-btn" id="btn-clear-log"><span data-i18n="btn_clear">Clear</span></button>
+            </div>
+            <div class="log-feed" id="log-feed">
+              <div class="log-line log--dim" data-i18n="log_ready_init">Ready.</div>
+            </div>
+          </div>
+
+        </div>
+      </div>
+    </div>
+
+    <!-- EVALUATE PAGE -->
+    <div class="page" id="page-evaluate">
+      <div class="eval-page">
+        <div class="eval-header">
+          <div>
+            <h1 data-i18n="eval_title">Evaluation</h1>
+            <p class="page-sub"><span data-i18n="eval_sub">Compare the same prompt at different quality settings —
+                useful for understanding the tradeoffs between speed and quality.</span></p>
+          </div>
+        </div>
+
+        <!-- Prompt input -->
+        <div class="eval-prompt-block">
+          <div class="field-label-row">
+            <label class="field-label"><span data-i18n="eval_prompt_label">Prompt to evaluate</span></label>
+          </div>
+          <textarea id="eval-prompt" class="textarea" rows="3"
+            placeholder="Enter a music description to compare across different settings..."></textarea>
+          <div class="field-label-row" style="margin-top:10px">
+            <label class="field-label"><span data-i18n="label_lyrics">Lyrics</span> <span class="label-muted"
+                data-i18n="label_optional">optional</span></label>
+          </div>
+          <textarea id="eval-lyrics" class="textarea" rows="3" placeholder="Optional lyrics..."></textarea>
+        </div>
+
+        <!-- Comparison presets -->
+        <div class="eval-presets">
+          <div class="eval-preset-head">
+            <label class="field-label"><span data-i18n="eval_presets_title">Comparison Presets</span></label>
+            <span class="label-muted"><span data-i18n="eval_presets_hint">customize each variant</span></span>
+          </div>
+          <div class="eval-variants" id="eval-variants">
+
+            <div class="eval-variant" data-idx="0">
+              <div class="eval-variant-header">
+                <span class="eval-variant-name"><span data-i18n="eval_variant_a">Variant A — Fast</span></span>
+                <span class="eval-variant-badge eval-badge--blue" data-i18n="badge_speed">Speed</span>
+              </div>
+              <div class="eval-variant-params">
+                <div class="eval-param">
+                  <label data-i18n="param_steps">Steps</label>
+                  <input type="number" class="input input--mini eval-steps" value="20" min="10" max="100" />
+                </div>
+                <div class="eval-param">
+                  <label data-i18n="param_duration">Duration</label>
+                  <input type="number" class="input input--mini eval-duration" value="30" min="10" max="120" />
+                  <span class="eval-param-unit" data-i18n="unit_sec">sec</span>
+                </div>
+                <div class="eval-param">
+                  <label data-i18n="param_guidance">Guidance</label>
+                  <input type="number" class="input input--mini eval-guidance" value="7.5" min="1" max="20"
+                    step="0.5" />
+                </div>
+              </div>
+              <div class="eval-variant-result hidden" id="eval-result-0">
+                <div class="eval-result-player">
+                  <canvas class="eval-art" width="48" height="48" id="eval-art-0"></canvas>
+                  <div class="eval-result-info">
+                    <div class="eval-result-status" id="eval-status-0">Waiting...</div>
+                    <div class="eval-result-meta" id="eval-meta-0"></div>
+                  </div>
+                </div>
+                <div class="eval-waveform" id="eval-wf-0">
+                  <canvas id="eval-wf-canvas-0"></canvas>
+                  <div class="eval-wf-fill" id="eval-wf-fill-0"></div>
+                </div>
+                <div class="eval-controls">
+                  <button class="eval-play-btn" id="eval-play-0">
+                    <svg viewBox="0 0 20 20">
+                      <polygon points="5,3 18,10 5,17" fill="currentColor" />
+                    </svg>
+                  </button>
+                  <span class="eval-time" id="eval-time-0">0:00</span>
+                </div>
+                <div class="eval-analysis hidden" id="eval-analysis-0">
+                  <div class="eval-metric"><span class="eval-metric-val" id="eval-bpm-0">—</span><span
+                      class="eval-metric-lbl">BPM</span></div>
+                  <div class="eval-metric"><span class="eval-metric-val" id="eval-key-0">—</span><span
+                      class="eval-metric-lbl">Key</span></div>
+                  <div class="eval-metric"><span class="eval-metric-val" id="eval-mood-0">—</span><span
+                      class="eval-metric-lbl">Mood</span></div>
+                  <div class="eval-metric"><span class="eval-metric-val" id="eval-energy-0">—</span><span
+                      class="eval-metric-lbl">Energy</span></div>
+                  <div class="eval-metric"><span class="eval-metric-val" id="eval-gentime-0">—</span><span
+                      class="eval-metric-lbl">Gen Time</span></div>
+                </div>
+              </div>
+            </div>
+
+            <div class="eval-variant" data-idx="1">
+              <div class="eval-variant-header">
+                <span class="eval-variant-name"><span data-i18n="eval_variant_b">Variant B — Balanced</span></span>
+                <span class="eval-variant-badge eval-badge--green" data-i18n="badge_recommended">Recommended</span>
+              </div>
+              <div class="eval-variant-params">
+                <div class="eval-param">
+                  <label data-i18n="param_steps">Steps</label>
+                  <input type="number" class="input input--mini eval-steps" value="30" min="10" max="100" />
+                </div>
+                <div class="eval-param">
+                  <label data-i18n="param_duration">Duration</label>
+                  <input type="number" class="input input--mini eval-duration" value="60" min="10" max="120" />
+                  <span class="eval-param-unit" data-i18n="unit_sec">sec</span>
+                </div>
+                <div class="eval-param">
+                  <label data-i18n="param_guidance">Guidance</label>
+                  <input type="number" class="input input--mini eval-guidance" value="7.5" min="1" max="20"
+                    step="0.5" />
+                </div>
+              </div>
+              <div class="eval-variant-result hidden" id="eval-result-1">
+                <div class="eval-result-player">
+                  <canvas class="eval-art" width="48" height="48" id="eval-art-1"></canvas>
+                  <div class="eval-result-info">
+                    <div class="eval-result-status" id="eval-status-1">Waiting...</div>
+                    <div class="eval-result-meta" id="eval-meta-1"></div>
+                  </div>
+                </div>
+                <div class="eval-waveform" id="eval-wf-1">
+                  <canvas id="eval-wf-canvas-1"></canvas>
+                  <div class="eval-wf-fill" id="eval-wf-fill-1"></div>
+                </div>
+                <div class="eval-controls">
+                  <button class="eval-play-btn" id="eval-play-1">
+                    <svg viewBox="0 0 20 20">
+                      <polygon points="5,3 18,10 5,17" fill="currentColor" />
+                    </svg>
+                  </button>
+                  <span class="eval-time" id="eval-time-1">0:00</span>
+                </div>
+                <div class="eval-analysis hidden" id="eval-analysis-1">
+                  <div class="eval-metric"><span class="eval-metric-val" id="eval-bpm-1">—</span><span
+                      class="eval-metric-lbl">BPM</span></div>
+                  <div class="eval-metric"><span class="eval-metric-val" id="eval-key-1">—</span><span
+                      class="eval-metric-lbl">Key</span></div>
+                  <div class="eval-metric"><span class="eval-metric-val" id="eval-mood-1">—</span><span
+                      class="eval-metric-lbl">Mood</span></div>
+                  <div class="eval-metric"><span class="eval-metric-val" id="eval-energy-1">—</span><span
+                      class="eval-metric-lbl">Energy</span></div>
+                  <div class="eval-metric"><span class="eval-metric-val" id="eval-gentime-1">—</span><span
+                      class="eval-metric-lbl">Gen Time</span></div>
+                </div>
+              </div>
+            </div>
+
+            <div class="eval-variant" data-idx="2">
+              <div class="eval-variant-header">
+                <span class="eval-variant-name"><span data-i18n="eval_variant_c">Variant C — Quality</span></span>
+                <span class="eval-variant-badge eval-badge--yellow" data-i18n="badge_quality">Best Quality</span>
+              </div>
+              <div class="eval-variant-params">
+                <div class="eval-param">
+                  <label data-i18n="param_steps">Steps</label>
+                  <input type="number" class="input input--mini eval-steps" value="50" min="10" max="100" />
+                </div>
+                <div class="eval-param">
+                  <label data-i18n="param_duration">Duration</label>
+                  <input type="number" class="input input--mini eval-duration" value="90" min="10" max="120" />
+                  <span class="eval-param-unit" data-i18n="unit_sec">sec</span>
+                </div>
+                <div class="eval-param">
+                  <label data-i18n="param_guidance">Guidance</label>
+                  <input type="number" class="input input--mini eval-guidance" value="7.5" min="1" max="20"
+                    step="0.5" />
+                </div>
+              </div>
+              <div class="eval-variant-result hidden" id="eval-result-2">
+                <div class="eval-result-player">
+                  <canvas class="eval-art" width="48" height="48" id="eval-art-2"></canvas>
+                  <div class="eval-result-info">
+                    <div class="eval-result-status" id="eval-status-2">Waiting...</div>
+                    <div class="eval-result-meta" id="eval-meta-2"></div>
+                  </div>
+                </div>
+                <div class="eval-waveform" id="eval-wf-2">
+                  <canvas id="eval-wf-canvas-2"></canvas>
+                  <div class="eval-wf-fill" id="eval-wf-fill-2"></div>
+                </div>
+                <div class="eval-controls">
+                  <button class="eval-play-btn" id="eval-play-2">
+                    <svg viewBox="0 0 20 20">
+                      <polygon points="5,3 18,10 5,17" fill="currentColor" />
+                    </svg>
+                  </button>
+                  <span class="eval-time" id="eval-time-2">0:00</span>
+                </div>
+                <div class="eval-analysis hidden" id="eval-analysis-2">
+                  <div class="eval-metric"><span class="eval-metric-val" id="eval-bpm-2">—</span><span
+                      class="eval-metric-lbl">BPM</span></div>
+                  <div class="eval-metric"><span class="eval-metric-val" id="eval-key-2">—</span><span
+                      class="eval-metric-lbl">Key</span></div>
+                  <div class="eval-metric"><span class="eval-metric-val" id="eval-mood-2">—</span><span
+                      class="eval-metric-lbl">Mood</span></div>
+                  <div class="eval-metric"><span class="eval-metric-val" id="eval-energy-2">—</span><span
+                      class="eval-metric-lbl">Energy</span></div>
+                  <div class="eval-metric"><span class="eval-metric-val" id="eval-gentime-2">—</span><span
+                      class="eval-metric-lbl">Gen Time</span></div>
+                </div>
+              </div>
+            </div>
+
+          </div>
+        </div>
+
+        <!-- Run button -->
+        <div class="eval-run-block">
+          <div class="eval-progress hidden" id="eval-progress">
+            <div class="eval-progress-bar">
+              <div class="eval-progress-fill" id="eval-progress-fill"></div>
+            </div>
+            <span class="eval-progress-label" id="eval-progress-label">Starting...</span>
+          </div>
+          <button class="btn-generate" id="btn-eval-run" style="max-width:400px">
+            <span id="eval-run-idle">
+              <svg viewBox="0 0 20 20" fill="none" style="width:18px;height:18px">
+                <polygon points="5,3 19,10 5,17" fill="currentColor" />
+              </svg>
+              <span data-i18n="btn_run_comparison">Run Comparison</span>
+            </span>
+            <span id="eval-run-busy" class="hidden">
+              <span class="spin"></span>
+              <span id="eval-run-label">Generating variant 1/3...</span>
+            </span>
+          </button>
+        </div>
+
+      </div>
+    </div>
+
+    <!-- LIBRARY PAGE -->
+    <div class="page" id="page-library">
+      <div class="lib-page">
+
+        <!-- Stats row -->
+        <div class="lib-stats" id="lib-stats">
+          <div class="lib-stat-card">
+            <span class="lib-stat-val" id="stat-total">—</span>
+            <span class="lib-stat-label" data-i18n="stat_total">Total Generated</span>
+          </div>
+          <div class="lib-stat-card">
+            <span class="lib-stat-val" id="stat-avg-bpm">—</span>
+            <span class="lib-stat-label" data-i18n="stat_avg_bpm">Avg BPM</span>
+          </div>
+          <div class="lib-stat-card">
+            <span class="lib-stat-val" id="stat-avg-dur">—</span>
+            <span class="lib-stat-label" data-i18n="stat_avg_dur">Avg Duration</span>
+          </div>
+          <div class="lib-stat-card">
+            <span class="lib-stat-val" id="stat-avg-energy">—</span>
+            <span class="lib-stat-label" data-i18n="stat_avg_energy">Avg Energy</span>
+          </div>
+          <div class="lib-stat-card">
+            <span class="lib-stat-val" id="stat-recent">—</span>
+            <span class="lib-stat-label" data-i18n="stat_last7">Last 7 Days</span>
+          </div>
+          <div class="lib-stat-card lib-stat-card--wide">
+            <span class="lib-stat-label" data-i18n="stat_top_moods" style="margin-bottom:8px">Top Moods</span>
+            <div class="lib-stat-moods" id="stat-moods"></div>
+          </div>
+        </div>
+
+        <div class="lib-page-head">
+          <h1 data-i18n="lib_history">Track History</h1>
+          <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+            <div class="lib-filter-tabs">
+              <button class="lib-filter-tab active" id="lib-tab-all">All</button>
+              <button class="lib-filter-tab" id="lib-tab-favs">
+                <svg viewBox="0 0 16 16" fill="currentColor" width="12" height="12" style="vertical-align:-1px;margin-right:3px"><path d="M8 1.5l1.8 3.6 4 .6-2.9 2.8.7 4L8 10.4l-3.6 1.9.7-4L2.2 5.7l4-.6z"/></svg>Favorites
+              </button>
+              <button class="lib-filter-tab" id="lib-tab-vs">
+                <svg viewBox="0 0 16 16" fill="none" width="12" height="12" style="vertical-align:-1px;margin-right:3px"><path d="M8 1a2 2 0 00-2 2v4a2 2 0 004 0V3a2 2 0 00-2-2z" fill="currentColor" opacity=".8"/><path d="M12 7v1a4 4 0 01-8 0V7" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>Voice Sections
+              </button>
+            </div>
+            <input type="text" id="lib-search" class="input input--mini" placeholder="Search prompts..."
+              data-i18n-placeholder="lib_search_placeholder" style="width:200px" />
+            <button class="btn-ghost" id="btn-refresh-lib"><span data-i18n="btn_refresh">Refresh</span></button>
+            <button class="btn-ghost" id="btn-export-csv" style="border-color:var(--green);color:var(--green)">
+              <span data-i18n="btn_export_csv">Export CSV</span>
+            </button>
+          </div>
+        </div>
+        <!-- Sort / view / bulk toolbar -->
+        <div class="lib-toolbar" id="lib-toolbar">
+          <div class="lib-sort-pills">
+            <span class="lib-sort-label">Sort:</span>
+            <button class="lib-sort-pill active" data-sort="newest">Newest</button>
+            <button class="lib-sort-pill" data-sort="oldest">Oldest</button>
+            <button class="lib-sort-pill" data-sort="duration">Duration</button>
+            <button class="lib-sort-pill" data-sort="bpm">BPM</button>
+            <button class="lib-sort-pill" data-sort="energy">Energy</button>
+          </div>
+          <div class="lib-view-actions">
+            <button class="lib-view-btn active" id="btn-view-grid" title="Grid view">
+              <svg viewBox="0 0 16 16" width="14" height="14" fill="currentColor"><rect x="1" y="1" width="6" height="6" rx="1"/><rect x="9" y="1" width="6" height="6" rx="1"/><rect x="1" y="9" width="6" height="6" rx="1"/><rect x="9" y="9" width="6" height="6" rx="1"/></svg>
+            </button>
+            <button class="lib-view-btn" id="btn-view-list" title="List view">
+              <svg viewBox="0 0 16 16" width="14" height="14" fill="currentColor"><rect x="1" y="2" width="14" height="2" rx="1"/><rect x="1" y="7" width="14" height="2" rx="1"/><rect x="1" y="12" width="14" height="2" rx="1"/></svg>
+            </button>
+            <button class="btn-ghost lib-select-btn" id="btn-bulk-toggle">Select</button>
+          </div>
+        </div>
+
+        <!-- Bulk action bar -->
+        <div class="lib-bulk-bar hidden" id="lib-bulk-bar">
+          <span class="lib-bulk-count" id="lib-bulk-count">0 selected</span>
+          <button class="btn-ghost" id="btn-bulk-dl">↓ Download</button>
+          <button class="btn-ghost" id="btn-bulk-zip">⬇ Export ZIP</button>
+          <button class="btn-ghost lib-bulk-del-btn" id="btn-bulk-del">✕ Delete</button>
+          <button class="btn-ghost" id="btn-bulk-deselect">Clear</button>
+        </div>
+
+        <div class="lib-grid" id="lib-grid">
+          <div class="lib-empty" data-i18n="lib_empty">No tracks yet. Generate something first.</div>
+        </div>
+        <div class="lib-load-more hidden" id="lib-load-more">
+          <button class="btn-ghost" id="btn-load-more"><span data-i18n="btn_load_more">Load more</span></button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ══ VOICE PAGE ════════════════════════════════════════════ -->
+    <div class="page" id="page-voice">
+    <div class="voice-layout">
+      <div class="page-heading">
+        <h1 data-i18n="voice_title">My Voice</h1>
+        <p class="page-sub" data-i18n="voice_sub">Save a voice profile — then use it in Studio to sing any song in your voice</p>
+      </div>
+
+      <!-- Record / Upload panel -->
+      <div class="voice-card" id="voice-add-panel">
+
+        <!-- SVC / RVC type tabs -->
+        <div class="voice-type-tabs">
+          <button class="voice-type-tab active" data-type="svc" id="tab-svc">
+            <span class="voice-badge voice-badge--svc">SVC</span>
+            <span class="voice-tab-info">
+              <span class="voice-tab-label">Seed-VC</span>
+              <span class="voice-tab-sub" data-i18n="voice_svc_sub">Zero-shot · any recording</span>
+            </span>
+          </button>
+          <button class="voice-type-tab" data-type="rvc" id="tab-rvc">
+            <span class="voice-badge voice-badge--rvc">RVC</span>
+            <span class="voice-tab-info">
+              <span class="voice-tab-label" data-i18n="voice_rvc_label">RVC Model</span>
+              <span class="voice-tab-sub" data-i18n="voice_rvc_sub">Upload trained model</span>
+            </span>
+          </button>
+        </div>
+
+        <!-- ── SVC panel ─────────────────────────────────────── -->
+        <div id="voice-svc-panel">
+          <div class="voice-step-label" data-i18n="voice_step_record">Record or upload a 10–60 second voice sample</div>
+
+          <!-- Recorder -->
+          <div class="voice-recorder-row">
+            <button class="btn-record" id="btn-record">
+              <svg viewBox="0 0 24 24" fill="none" width="18" height="18">
+                <path d="M12 1a3 3 0 00-3 3v8a3 3 0 006 0V4a3 3 0 00-3-3z" fill="currentColor"/>
+                <path d="M19 10v2a7 7 0 01-14 0v-2M12 19v4M8 23h8" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+              </svg>
+              <span id="btn-record-label" data-i18n="btn_start_record">Start Recording</span>
+            </button>
+            <span class="voice-or" data-i18n="voice_or">or</span>
+            <input type="file" id="voice-file-input" accept="audio/*" class="rvc-file-input" />
+            <label for="voice-file-input" class="voice-upload-label" id="voice-file-label">
+              <svg viewBox="0 0 24 24" fill="none" width="16" height="16">
+                <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M17 8l-5-5-5 5M12 3v12" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+              </svg>
+              <span data-i18n="btn_upload_audio">Upload Audio</span>
+            </label>
+          </div>
+
+          <!-- Recording timer -->
+          <div class="voice-timer hidden" id="voice-timer">
+            <span class="voice-timer-dot"></span>
+            <span id="voice-timer-label">0:00 / 1:00</span>
+          </div>
+
+          <!-- Preview before saving -->
+          <audio id="voice-preview" controls class="voice-preview-player hidden"></audio>
+
+          <!-- Waveform visualization of the loaded audio -->
+          <canvas id="voice-waveform" class="voice-waveform-canvas hidden" height="60"></canvas>
+
+          <!-- Name + save -->
+          <div class="voice-save-row hidden" id="voice-save-row">
+            <input type="text" id="voice-name-input" class="input" placeholder="Name this voice (e.g. My Voice)" maxlength="40" />
+            <button class="btn-save-voice" id="btn-save-voice"><span data-i18n="btn_save_profile">Save Profile</span></button>
+          </div>
+
+          <!-- Filter progress (shown while processing) -->
+          <div id="voice-filter-progress" class="voice-filter-progress hidden">
+            <div class="voice-filter-bars" aria-hidden="true">
+              <span></span><span></span><span></span><span></span>
+              <span></span><span></span><span></span><span></span>
+            </div>
+            <div class="voice-filter-stages">
+              <div class="voice-filter-stage" id="vfs-0">
+                <span class="vfs-dot"></span>
+                <span class="vfs-label" data-i18n="voice_isolating">Isolating vocals</span>
+              </div>
+              <div class="voice-filter-stage" id="vfs-1">
+                <span class="vfs-dot"></span>
+                <span class="vfs-label" data-i18n="voice_denoising">Denoising</span>
+              </div>
+              <div class="voice-filter-stage" id="vfs-2">
+                <span class="vfs-dot"></span>
+                <span class="vfs-label" data-i18n="voice_normalizing">Normalizing</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- ── RVC panel ─────────────────────────────────────── -->
+        <div id="voice-rvc-panel" class="hidden">
+          <div class="voice-step-label" data-i18n="voice_rvc_step">Upload your trained RVC model file</div>
+          <div class="voice-rvc-note">
+            Train a model with
+            <a href="https://github.com/RVC-Project/Retrieval-based-Voice-Conversion-WebUI" target="_blank" rel="noopener">RVC WebUI</a>
+            or a Colab notebook, then upload the resulting <code>.pth</code> file.
+            The <code>.index</code> file improves voice similarity (optional).
+          </div>
+
+          <div class="voice-rvc-uploads">
+            <!-- .pth model (required) -->
+            <div class="voice-rvc-upload-slot">
+              <input type="file" id="rvc-model-input" accept=".pth" class="rvc-file-input" />
+              <label for="rvc-model-input" class="voice-upload-label voice-rvc-label" id="rvc-model-label">
+                <svg viewBox="0 0 24 24" fill="none" width="16" height="16">
+                  <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M17 8l-5-5-5 5M12 3v12" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                </svg>
+                <span data-i18n="btn_upload_pth">Upload .pth Model</span> <span class="rvc-required">*</span>
+              </label>
+            </div>
+            <!-- .index file (optional) -->
+            <div class="voice-rvc-upload-slot">
+              <input type="file" id="rvc-index-input" accept=".index" class="rvc-file-input" />
+              <label for="rvc-index-input" class="voice-upload-label voice-rvc-label" id="rvc-index-label">
+                <svg viewBox="0 0 24 24" fill="none" width="16" height="16">
+                  <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M17 8l-5-5-5 5M12 3v12" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                </svg>
+                <span data-i18n="btn_upload_index">Upload .index</span> <span class="rvc-optional" data-i18n="label_optional_parens">(optional)</span>
+              </label>
+            </div>
+          </div>
+
+          <!-- Name + save row for RVC -->
+          <div class="voice-save-row hidden" id="voice-rvc-save-row">
+            <input type="text" id="rvc-name-input" class="input" placeholder="Name this voice model" maxlength="40" />
+            <button class="btn-save-voice" id="btn-save-rvc"><span data-i18n="btn_save_rvc">Save RVC Model</span></button>
+          </div>
+        </div>
+
+        <!-- Shared status line -->
+        <div id="voice-register-status" class="rvc-status"></div>
+      </div>
+
+      <!-- Saved profiles list -->
+      <div class="voice-card" id="voice-profiles-card">
+        <div class="voice-step-label" data-i18n="voice_saved">Saved voices</div>
+        <div id="voice-profiles-list" class="voice-profiles-list">
+          <p class="voice-empty-hint" data-i18n="voice_empty">No voices saved yet — record or upload one above.</p>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+    <!-- ══ TRAIN PAGE ═══════════════════════════════════════════ -->
+    <div class="page" id="page-train">
+      <div class="train-layout">
+
+        <div class="page-heading">
+          <h1 data-i18n="train_title">Train Voice Model</h1>
+          <p class="page-sub" data-i18n="train_sub">Upload multiple voice recordings to train a custom speaker model</p>
+        </div>
+
+        <!-- Upload zone -->
+        <div class="train-card" id="train-upload-card">
+          <div class="train-section-label" data-i18n="train_data_label">Training Data</div>
+          <div class="train-dropzone" id="train-dropzone">
+            <div class="train-drop-icon">
+              <svg viewBox="0 0 48 48" fill="none" width="40" height="40">
+                <path d="M24 32V16M17 23l7-7 7 7" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                <rect x="4" y="36" width="40" height="8" rx="4" stroke="currentColor" stroke-width="2" opacity=".3"/>
+              </svg>
+            </div>
+            <p class="train-drop-title"><span data-i18n="train_drop_title">Drop audio files here or</span> <span class="train-drop-link" data-i18n="train_drop_link">click to browse</span></p>
+            <p class="train-drop-hint" data-i18n="train_drop_hint">WAV · MP3 · FLAC · Multiple files recommended (5–60 seconds each)</p>
+            <input type="file" id="train-file-input" multiple accept="audio/*" style="display:none" />
+          </div>
+          <div class="train-file-list" id="train-file-list"></div>
+        </div>
+
+        <!-- Parameters -->
+        <div class="train-card" id="train-params-card">
+          <div class="train-section-label" data-i18n="train_params_label">Training Parameters</div>
+          <div class="train-params-grid">
+            <div class="train-param-field">
+              <label><span data-i18n="train_model_name">Model Name</span></label>
+              <input type="text" id="train-name" class="input" placeholder="My Trained Voice" maxlength="40" />
+            </div>
+            <div class="train-param-field">
+              <label><span data-i18n="train_epochs">Epochs</span> <span class="train-param-hint" data-i18n="train_epochs_hint">More = better quality, slower</span></label>
+              <input type="number" id="train-epochs" class="input" value="80" min="20" max="400" step="10" />
+            </div>
+            <div class="train-param-field">
+              <label><span data-i18n="train_sample_rate">Sample Rate</span></label>
+              <select id="train-sr" class="input">
+                <option value="40000" selected>40000 Hz (recommended)</option>
+                <option value="32000">32000 Hz</option>
+                <option value="48000">48000 Hz</option>
+              </select>
+            </div>
+            <div class="train-param-field">
+              <label><span data-i18n="train_batch_size">Batch Size</span></label>
+              <input type="number" id="train-batch" class="input" value="16" min="4" max="64" step="4" />
+            </div>
+          </div>
+        </div>
+
+        <!-- Controls -->
+        <div class="train-controls">
+          <button class="btn-generate" id="btn-start-train" style="max-width:240px">
+            <span id="train-idle-label">
+              <svg viewBox="0 0 20 20" fill="none" width="18" height="18" style="margin-right:6px">
+                <polygon points="4,3 18,10 4,17" fill="currentColor"/>
+              </svg>
+              <span data-i18n="btn_start_train">Start Training</span>
+            </span>
+            <span id="train-busy-label" class="hidden">
+              <span class="spin"></span>
+              <span data-i18n="train_busy">Training…</span>
+            </span>
+          </button>
+          <button class="btn-ghost hidden" id="btn-stop-train"><span data-i18n="btn_stop">Stop</span></button>
+          <span class="train-file-count" id="train-file-count"></span>
+        </div>
+
+        <!-- Progress visualization -->
+        <div class="train-progress-card hidden" id="train-progress-card">
+
+          <!-- Stage pipeline -->
+          <div class="train-stages">
+            <div class="train-stage" id="tstage-init">
+              <div class="train-stage-dot"></div>
+              <span data-i18n="train_stage_init">Init</span>
+            </div>
+            <div class="train-stage-connector"></div>
+            <div class="train-stage" id="tstage-preprocess">
+              <div class="train-stage-dot"></div>
+              <span data-i18n="train_stage_preprocess">Preprocess</span>
+            </div>
+            <div class="train-stage-connector"></div>
+            <div class="train-stage" id="tstage-extract_f0">
+              <div class="train-stage-dot"></div>
+              <span>F0</span>
+            </div>
+            <div class="train-stage-connector"></div>
+            <div class="train-stage" id="tstage-extract_feats">
+              <div class="train-stage-dot"></div>
+              <span data-i18n="train_stage_features">Features</span>
+            </div>
+            <div class="train-stage-connector"></div>
+            <div class="train-stage" id="tstage-train">
+              <div class="train-stage-dot"></div>
+              <span data-i18n="train_stage_train">Train</span>
+            </div>
+            <div class="train-stage-connector"></div>
+            <div class="train-stage" id="tstage-finalize">
+              <div class="train-stage-dot"></div>
+              <span data-i18n="train_stage_finalize">Finalize</span>
+            </div>
+          </div>
+
+          <!-- Progress bar + percentage -->
+          <div class="train-progress-bar-wrap">
+            <div class="train-progress-bar">
+              <div class="train-progress-fill" id="train-progress-fill"></div>
+            </div>
+            <span class="train-progress-pct" id="train-progress-pct">0%</span>
+          </div>
+
+          <!-- Status message -->
+          <p class="train-status-msg" id="train-status-msg">Initializing…</p>
+
+          <!-- Loss chart -->
+          <div class="train-chart-wrap" id="train-chart-wrap">
+            <div class="train-chart-label" data-i18n="train_loss_label">Training Loss</div>
+            <canvas id="train-loss-canvas" class="train-loss-canvas" height="120"></canvas>
+          </div>
+
+          <!-- Log -->
+          <div class="train-log-label" data-i18n="train_log_label">Log</div>
+          <div class="train-log" id="train-log"></div>
+        </div>
+
+        <!-- Done banner -->
+        <div class="train-done-card hidden" id="train-done-card">
+          <div class="train-done-icon">✓</div>
+          <div class="train-done-title" data-i18n="train_done_title">Training Complete!</div>
+          <p class="train-done-sub" id="train-done-sub" data-i18n="train_done_sub">Voice model saved to your profiles.</p>
+          <button class="btn-ghost" id="btn-goto-voice"><span data-i18n="btn_goto_voice">Go to Voice Profiles →</span></button>
+        </div>
+
+      </div>
+    </div>
+
+  </div>
+
+  <!-- ══ BOTTOM PLAYER BAR ════════════════════════════════════ -->
+  <!-- Spotify-style persistent bottom bar, shows when track loaded -->
+  <div class="player-bar hidden" id="player-bar">
+    <div class="bar-left">
+      <canvas id="bar-art" width="56" height="56" class="bar-art"></canvas>
+      <div class="bar-info">
+        <div class="bar-title" id="bar-title">—</div>
+        <div class="bar-meta" id="bar-meta">—</div>
+      </div>
+    </div>
+    <div class="bar-center">
+      <div class="bar-controls">
+        <button class="bar-ctrl" id="bar-back">
+          <svg viewBox="0 0 20 20" fill="none">
+            <polygon points="16,4 4,10 16,16" fill="currentColor" opacity=".6" />
+            <rect x="2" y="4" width="3" height="12" rx="1" fill="currentColor" />
+          </svg>
+        </button>
+        <button class="bar-play" id="bar-play">
+          <svg class="bar-play-icon" viewBox="0 0 20 20">
+            <polygon points="5,2 18,10 5,18" fill="currentColor" />
+          </svg>
+          <svg class="bar-pause-icon hidden" viewBox="0 0 20 20">
+            <rect x="4" y="2" width="4" height="16" rx="1" fill="currentColor" />
+            <rect x="12" y="2" width="4" height="16" rx="1" fill="currentColor" />
+          </svg>
+        </button>
+        <button class="bar-ctrl" id="bar-fwd">
+          <svg viewBox="0 0 20 20" fill="none">
+            <polygon points="4,4 16,10 4,16" fill="currentColor" opacity=".6" />
+            <rect x="15" y="4" width="3" height="12" rx="1" fill="currentColor" />
+          </svg>
+        </button>
+      </div>
+      <div class="bar-progress">
+        <span class="bar-time" id="bar-now">0:00</span>
+        <div class="bar-track" id="bar-track">
+          <div class="bar-fill" id="bar-fill"></div>
+        </div>
+        <span class="bar-time" id="bar-total">0:00</span>
+      </div>
+    </div>
+    <div class="bar-right">
+      <button class="bar-action" id="bar-download">↓</button>
+    </div>
+  </div>
+
+  <!-- ══ AI MODAL ══════════════════════════════════════════════ -->
+  <div class="modal-bg hidden" id="ai-modal">
+    <div class="modal">
+      <div class="modal-head">
+        <span class="modal-title" id="modal-title">AI</span>
+        <button class="modal-x" id="modal-close">✕</button>
+      </div>
+      <div class="modal-body" id="modal-body">
+        <div class="thinking">
+          <div class="dots"><span></span><span></span><span></span></div>
+          <p id="think-label" data-i18n="modal_working">Working…</p>
+        </div>
+      </div>
+      <div class="modal-foot hidden" id="modal-foot">
+        <button class="btn-ghost" id="modal-discard"><span data-i18n="modal_discard">Discard</span></button>
+        <button class="btn-apply" id="modal-apply"><span data-i18n="modal_apply">Apply</span></button>
+      </div>
+    </div>
+  </div>
+
+
+
+  <audio id="audio" crossorigin="anonymous"></audio>
+  <!-- Toast notification container -->
+  <div id="toast-container" aria-live="polite"></div>
+
+  <script src="/static/app.js"></script>
+</body>
+
+</html>
