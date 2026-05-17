@@ -1,4 +1,4 @@
-"""Voice pipeline worker — run as subprocess from soundforge/server.py.
+"""Voice pipeline worker — run as subprocess from maz/server.py.
 
 Usage:
     python voice_pipeline_worker.py <generated_audio> <voice_reference> <output_path>
@@ -91,8 +91,8 @@ if VOICE_TYPE == "rvc":
             sep = Separator(output_dir=str(sep_dir_r), output_format="WAV", log_level=30)
             sep.load_model("model_bs_roformer_ep_317_sdr_12.9755.ckpt")
             out_files = sep.separate(str(generated_audio))
-            voc_files = [Path(f) for f in out_files if "(Vocals)" in Path(f).name]
-            ins_files = [Path(f) for f in out_files if "(Instrumental)" in Path(f).name]
+            voc_files = [sep_dir_r / Path(f).name for f in out_files if "(Vocals)" in f]
+            ins_files = [sep_dir_r / Path(f).name for f in out_files if "(Instrumental)" in f]
             if not voc_files: voc_files = sorted(sep_dir_r.glob("*(Vocals)*.wav"))
             if not ins_files: ins_files = sorted(sep_dir_r.glob("*(Instrumental)*.wav"))
             if voc_files and ins_files:
@@ -230,9 +230,9 @@ try:
         sep.load_model("model_bs_roformer_ep_317_sdr_12.9755.ckpt")
         out_files = sep.separate(str(generated_audio))
 
-        # audio-separator names outputs: {stem}_(Vocals)_{model}.wav etc.
-        voc_files = [Path(f) for f in out_files if "(Vocals)" in Path(f).name]
-        ins_files = [Path(f) for f in out_files if "(Instrumental)" in Path(f).name]
+        # audio-separator returns bare filenames — resolve against output dir
+        voc_files = [sep_dir / Path(f).name for f in out_files if "(Vocals)" in f]
+        ins_files = [sep_dir / Path(f).name for f in out_files if "(Instrumental)" in f]
 
         if not voc_files:
             voc_files = sorted(sep_dir.glob("*(Vocals)*.wav"))

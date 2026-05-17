@@ -66,8 +66,8 @@ try:
         sep = Separator(output_dir=str(sep_dir), output_format="WAV", log_level=30)
         sep.load_model("model_bs_roformer_ep_317_sdr_12.9755.ckpt")
         out_files = sep.separate(str(audio_path))
-        voc_f = [Path(f) for f in out_files if "(Vocals)" in Path(f).name]
-        ins_f = [Path(f) for f in out_files if "(Instrumental)" in Path(f).name]
+        voc_f = [sep_dir / Path(f).name for f in out_files if "(Vocals)" in f]
+        ins_f = [sep_dir / Path(f).name for f in out_files if "(Instrumental)" in f]
         if not voc_f: voc_f = sorted(sep_dir.glob("*(Vocals)*.wav"))
         if not ins_f: ins_f = sorted(sep_dir.glob("*(Instrumental)*.wav"))
         if voc_f and ins_f:

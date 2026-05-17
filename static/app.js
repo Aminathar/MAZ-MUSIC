@@ -18,10 +18,19 @@ document.addEventListener('DOMContentLoaded', function () {
     serverElapsed: null, // last `elapsed` value reported by server (seconds)
     serverSyncMs: null,  // Date.now() when serverElapsed was last received
     notFoundStreak: 0,   // consecutive /job/{id} 404s — used to clear stuck state
+    vocalGender: 'auto', // auto | female | male | mixed
   };
 
   const $ = id => document.getElementById(id);
   const $$ = s => document.querySelectorAll(s);
+
+  // Tracks the in-flight AI request so closing the modal cancels it
+  let _aiAbort = null;
+  function _startAIRequest() {
+    if (_aiAbort) _aiAbort.abort();
+    _aiAbort = new AbortController();
+    return _aiAbort;
+  }
   const audio = $('audio');
 
   /* Theme */
@@ -217,7 +226,7 @@ document.addEventListener('DOMContentLoaded', function () {
     const badge = $('q-badge');
     const body = $('q-body');
     if (aj?.job_id) {
-      badge.textContent = 'active';
+      badge.textContent = t('badge_active');
       badge.classList.add('on');
       const pct = Math.min(90, ((aj.elapsed || 0) / 90) * 100).toFixed(1);
       body.innerHTML = `
@@ -438,6 +447,16 @@ document.addEventListener('DOMContentLoaded', function () {
     });
   });
 
+  /* Vocal gender selector */
+  $$('.vocal-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      $$('.vocal-btn').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      S.vocalGender = btn.dataset.vocal;
+      log(`${t('label_vocals')}: ${t('vocal_' + S.vocalGender)}`, 'ai');
+    });
+  });
+
   /* AI: Enhance */
   $('btn-enhance').addEventListener('click', async () => {
     const p = $('prompt').value.trim();
@@ -445,18 +464,23 @@ document.addEventListener('DOMContentLoaded', function () {
     S.aiMode = 'enhance';
     $('modal-title').textContent = 'Enhance Prompt';
     showThinking('Enhancing your prompt with AI...');
+    const _enhanceCtrl = _startAIRequest();
     try {
       const r = await callAI(`You are an expert music prompt engineer. Enhance the original prompt into a precise, consistent, and concise description for an AI music generator.
 Focus on exact musical attributes such as genre, mood, tempo, instruments, and production style.
 Do NOT generate long paragraphs or random topics. Return a single cohesive sentence or comma-separated list.
 Return ONLY the enhanced prompt text.
 
-Original: "${p}"`);
+Original: "${p}"`, '', _enhanceCtrl.signal, 'enhance');
+      if (_enhanceCtrl.signal.aborted) return;
       if (!r) throw new Error('AI returned an empty response. Try again.');
       S.aiResult = r;
       showResult(r);
       log('Prompt enhanced', 'ai');
-    } catch (e) { showAIError(e.message); log(`AI: ${e.message}`, 'error'); }
+    } catch (e) {
+      if (e.name === 'AbortError') return;
+      showAIError(e.message); log(`AI: ${e.message}`, 'error');
+    }
   });
 
   /* AI: Lyrics */
@@ -482,6 +506,7 @@ Original: "${p}"`);
 
     S.aiMode = 'lyrics';
     showThinking('Writing your lyrics...');
+    const _lyricsCtrl = _startAIRequest();
 
     const uiToLyricLang = { en: 'english', kk: 'kazakh', ru: 'russian', tr: 'turkish', custom: 'custom' };
     const lang = uiToLyricLang[langCode] || 'english';
@@ -630,20 +655,25 @@ Structure:
     const serverLang = lang === 'custom' ? customLangName : langCode;
 
     try {
-      const r = await callAI(prompt, serverLang);
+      const r = await callAI(prompt, serverLang, _lyricsCtrl.signal);
+      if (_lyricsCtrl.signal.aborted) return;
       if (!r) throw new Error('AI returned an empty response. Try again.');
       S.aiResult = r;
       showResult(r);
       log(`Lyrics written in ${displayName}`, 'ai');
-    } catch (e) { showAIError(e.message); log(`AI: ${e.message}`, 'error'); }
+    } catch (e) {
+      if (e.name === 'AbortError') return;
+      showAIError(e.message); log(`AI: ${e.message}`, 'error');
+    }
   });
 
 
-  async function callAI(prompt, language = '') {
+  async function callAI(prompt, language = '', signal = null, mode = 'lyrics') {
     const res = await fetch('/ai/generate', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ prompt, language }),
+      body: JSON.stringify({ prompt, language, mode }),
+      signal,
     });
     if (!res.ok) {
       const e = await res.json().catch(() => ({}));
@@ -664,6 +694,15 @@ Structure:
 
   function showAIError(msg) {
     // Keep modal open, show the error with guidance so the user knows what to do
+    const isNoModel = /no local ai model/i.test(msg) || /no model/i.test(msg);
+    const hint = isNoModel
+      ? `<p style="opacity:.45;font-size:12px;line-height:1.5">
+          To enable AI: install <strong>Ollama</strong> from <code>ollama.ai</code>,<br>
+          then run: <code>ollama pull qwen3:8b</code>
+        </p>`
+      : `<p style="opacity:.45;font-size:12px;line-height:1.5">
+          If this keeps happening, try restarting Ollama or the server.
+        </p>`;
     $('modal-body').innerHTML = `
       <div style="text-align:center;padding:16px 8px">
         <svg viewBox="0 0 24 24" fill="none" style="width:36px;height:36px;opacity:.5;margin-bottom:10px">
@@ -672,10 +711,7 @@ Structure:
         </svg>
         <p style="font-weight:600;margin-bottom:8px">AI unavailable</p>
         <p style="opacity:.65;font-size:13px;line-height:1.6;margin-bottom:12px">${escHtml(msg)}</p>
-        <p style="opacity:.45;font-size:12px;line-height:1.5">
-          To enable AI: install <strong>Ollama</strong> from <code>ollama.ai</code>,<br>
-          then run: <code>ollama pull qwen3:8b</code>
-        </p>
+        ${hint}
       </div>`;
     $('modal-foot').classList.add('hidden');
   }
@@ -684,6 +720,7 @@ Structure:
     $('modal-foot').classList.remove('hidden');
   }
   function closeModal() {
+    if (_aiAbort) { _aiAbort.abort(); _aiAbort = null; }
     $('ai-modal').classList.add('hidden');
     S.aiResult = null; S.aiMode = null;
   }
@@ -726,6 +763,7 @@ Structure:
       key: $('key').value.trim() || null,
       language: S.lang,
       voice_id: voiceId || null,
+      vocal_gender: S.vocalGender,
     };
 
     requestNotifPermission();
@@ -854,16 +892,17 @@ Structure:
     audio.load();
 
     const dur = fmtDur(track.duration);
+    const displayTitle = (track.title || track.prompt || '');
 
     $('np-empty').classList.add('hidden');
     $('np-loaded').classList.remove('hidden');
     $('np-badge').textContent = 'NEW';
-    $('np-title').textContent = track.prompt.slice(0, 60) + (track.prompt.length > 60 ? '...' : '');
+    $('np-title').textContent = displayTitle.slice(0, 60) + (displayTitle.length > 60 ? '...' : '');
     $('np-meta').textContent = `${dur} · seed ${track.seed ?? '—'}`;
     drawArt($('np-art'), track.seed || 42, 260);
 
     $('player-bar').classList.remove('hidden');
-    $('bar-title').textContent = track.prompt.slice(0, 50) + (track.prompt.length > 50 ? '...' : '');
+    $('bar-title').textContent = displayTitle.slice(0, 50) + (displayTitle.length > 50 ? '...' : '');
     $('bar-meta').textContent = dur;
     drawArt($('bar-art'), track.seed || 42, 56);
 
@@ -881,12 +920,23 @@ Structure:
       drawWF();
     }, { once: true });
 
+    audio.addEventListener('error', () => {
+      setPlaying(false);
+      log('Audio file not found — it may have been cleaned up by the server', 'error');
+      toast('Could not load audio. Try regenerating the track.', 'error');
+    }, { once: true });
+
     setPlaying(false);
+
+    // Sync lyrics textarea to the loaded track so refreshSectionsPanel reads correctly
+    if (track.lyrics != null) {
+      $('lyrics').value = track.lyrics;
+    }
 
     // Run audio analysis automatically
     runAnalysis(track);
 
-    // Show voice sections panel if lyrics have [Section] tags
+    // Show voice sections panel (always — falls back to Whole Track if no tags)
     refreshSectionsPanel();
   }
 
@@ -967,12 +1017,10 @@ Structure:
     if (!panel || !S.track) return;
     const lyrics = S.track.lyrics || $('lyrics').value.trim();
     const sections = parseSections(lyrics);
-    if (!sections.length) {
-      panel.classList.add('hidden');
-      return;
-    }
+    // Always show the panel — fall back to a single "Whole Track" section
+    // so voice conversion is available even for tracks without structured lyrics.
     panel.classList.remove('hidden');
-    buildSectionRows(sections);
+    buildSectionRows(sections.length ? sections : ['Whole Track']);
   }
 
   // Toggle open/close — preserve user's selections when reopening
@@ -1458,7 +1506,10 @@ Structure:
       let tracks = d.tracks;
       if (search) {
         const q = search.toLowerCase();
-        tracks = tracks.filter(t => t.prompt.toLowerCase().includes(q));
+        tracks = tracks.filter(t =>
+          (t.title || '').toLowerCase().includes(q) ||
+          (t.prompt || '').toLowerCase().includes(q)
+        );
       }
       if (libFavOnly)  tracks = tracks.filter(t => t.favorited);
       if (libVSOnly)   tracks = tracks.filter(t => !!t.voice_sections_path);
@@ -1602,9 +1653,12 @@ Structure:
           const action = btn.dataset.a;
 
           if (action === 'play') {
+            const card = btn.closest('.lib-card');
+            const titleEl = card?.querySelector('.lib-card-title, .lib-list-title');
             const track = {
               id: Date.now(),
               job_id: jobId,
+              title: titleEl?.dataset.jobtitle || '',
               prompt: btn.dataset.prompt,
               lyrics: btn.dataset.lyrics || null,
               duration: parseFloat(btn.dataset.dur),
@@ -1617,7 +1671,16 @@ Structure:
             $$('.page').forEach(p => p.classList.remove('active'));
             document.querySelector('[data-view="studio"]').classList.add('active');
             $('page-studio').classList.add('active');
-            setTimeout(() => { audio.play(); setPlaying(true); }, 100);
+            const tryPlay = () => {
+              audio.play()
+                .then(() => setPlaying(true))
+                .catch(err => { if (err.name !== 'AbortError') { setPlaying(false); } });
+            };
+            if (audio.readyState >= 3) {
+              tryPlay();
+            } else {
+              audio.addEventListener('canplay', tryPlay, { once: true });
+            }
 
           } else if (action === 'dl') {
             const a = document.createElement('a');
@@ -2082,7 +2145,7 @@ Structure:
 
     variant.classList.add('active');
     $(`eval-result-${idx}`).classList.remove('hidden');
-    $(`eval-status-${idx}`).textContent = 'Generating...';
+    $(`eval-status-${idx}`).textContent = t('eval_generating');
     $(`eval-meta-${idx}`).textContent = `${steps} steps · ${duration}s`;
 
     const startTime = Date.now();
@@ -2170,7 +2233,7 @@ Structure:
 
       drawArt($(`eval-art-${idx}`), idx * 1000 + steps, 48);
 
-      $(`eval-status-${idx}`).textContent = 'Ready';
+      $(`eval-status-${idx}`).textContent = t('eval_ready');
       $(`eval-meta-${idx}`).textContent = `${steps} steps · ${duration}s · ${genTime}s gen time`;
 
       try {
@@ -2190,7 +2253,7 @@ Structure:
       return true;
 
     } catch (err) {
-      $(`eval-status-${idx}`).textContent = 'Failed: ' + err.message;
+      $(`eval-status-${idx}`).textContent = t('eval_failed') + ': ' + err.message;
       variant.classList.remove('active');
       return false;
     }
@@ -2327,6 +2390,34 @@ Structure:
       eval_variant_a: 'Variant A — Fast',
       eval_variant_b: 'Variant B — Balanced',
       eval_variant_c: 'Variant C — Quality',
+      // Vocals selector
+      label_vocals: 'Vocals',
+      vocal_auto: 'Auto',
+      vocal_female: 'Female',
+      vocal_male: 'Male',
+      vocal_mixed: 'Mixed',
+      // UI controls
+      btn_history: 'History',
+      badge_idle: 'idle',
+      badge_active: 'active',
+      btn_stems: 'Stems',
+      btn_normalize: 'Normalize',
+      vs_hint: 'Assign a different voice to each section of the song.',
+      vs_processing: 'Processing…',
+      btn_apply_sections: 'Apply Voice Sections',
+      lib_tab_all: 'All',
+      lib_tab_favs: 'Favorites',
+      lib_tab_vs: 'Voice Sections',
+      lib_sort_label: 'Sort:',
+      sort_newest: 'Newest',
+      sort_oldest: 'Oldest',
+      btn_select: 'Select',
+      btn_bulk_zip: 'Export ZIP',
+      btn_bulk_del: 'Delete',
+      metric_gen_time: 'Gen Time',
+      eval_generating: 'Generating…',
+      eval_ready: 'Ready',
+      eval_failed: 'Failed',
       // Voice toggle
       voice_toggle_label: 'Sing in my voice',
       // Video panel
@@ -2483,6 +2574,34 @@ Structure:
       eval_variant_a: 'А нұсқасы — Жылдам',
       eval_variant_b: 'В нұсқасы — Теңдестірілген',
       eval_variant_c: 'С нұсқасы — Сапалы',
+      // Vocals selector
+      label_vocals: 'Вокал',
+      vocal_auto: 'Авто',
+      vocal_female: 'Әйел',
+      vocal_male: 'Ер',
+      vocal_mixed: 'Аралас',
+      // UI controls
+      btn_history: 'Тарих',
+      badge_idle: 'күту',
+      badge_active: 'белсенді',
+      btn_stems: 'Стемдер',
+      btn_normalize: 'Нормалау',
+      vs_hint: 'Ән бөлімдеріне әртүрлі дауыстар тағайындаңыз.',
+      vs_processing: 'Өңделуде…',
+      btn_apply_sections: 'Дауыс бөлімдерін қолдану',
+      lib_tab_all: 'Барлығы',
+      lib_tab_favs: 'Таңдаулылар',
+      lib_tab_vs: 'Дауыс бөлімдері',
+      lib_sort_label: 'Сұрыптау:',
+      sort_newest: 'Жаңасы',
+      sort_oldest: 'Ескісі',
+      btn_select: 'Таңдау',
+      btn_bulk_zip: 'ZIP экспорт',
+      btn_bulk_del: 'Жою',
+      metric_gen_time: 'Жасау уақыты',
+      eval_generating: 'Жасалуда…',
+      eval_ready: 'Дайын',
+      eval_failed: 'Қате',
       // Voice toggle
       voice_toggle_label: 'Менің дауысыммен айту',
       // Video panel
@@ -2639,6 +2758,34 @@ Structure:
       eval_variant_a: 'Вариант А — Быстрый',
       eval_variant_b: 'Вариант В — Сбалансированный',
       eval_variant_c: 'Вариант С — Качественный',
+      // Vocals selector
+      label_vocals: 'Вокал',
+      vocal_auto: 'Авто',
+      vocal_female: 'Женский',
+      vocal_male: 'Мужской',
+      vocal_mixed: 'Микс',
+      // UI controls
+      btn_history: 'История',
+      badge_idle: 'ожид.',
+      badge_active: 'активно',
+      btn_stems: 'Стемы',
+      btn_normalize: 'Нормализация',
+      vs_hint: 'Назначьте разные голоса для каждой части песни.',
+      vs_processing: 'Обработка…',
+      btn_apply_sections: 'Применить голосовые секции',
+      lib_tab_all: 'Все',
+      lib_tab_favs: 'Избранное',
+      lib_tab_vs: 'Голосовые секции',
+      lib_sort_label: 'Сорт.:',
+      sort_newest: 'Новые',
+      sort_oldest: 'Старые',
+      btn_select: 'Выбрать',
+      btn_bulk_zip: 'Экспорт ZIP',
+      btn_bulk_del: 'Удалить',
+      metric_gen_time: 'Время ген.',
+      eval_generating: 'Генерация…',
+      eval_ready: 'Готово',
+      eval_failed: 'Ошибка',
       // Voice toggle
       voice_toggle_label: 'Петь моим голосом',
       // Video panel

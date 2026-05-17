@@ -192,7 +192,7 @@
               <div style="display:flex;align-items:center;gap:8px">
               <button class="hist-btn" id="btn-prompt-hist" title="Recent prompts">
                 <svg viewBox="0 0 16 16" fill="none" width="13" height="13"><circle cx="8" cy="8" r="6.5" stroke="currentColor" stroke-width="1.3"/><path d="M8 5v3.5l2 2" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>
-                History
+                <span data-i18n="btn_history">History</span>
               </button>
               <button class="ai-btn" id="btn-enhance">
                 <svg viewBox="0 0 16 16" fill="none">
@@ -217,7 +217,7 @@
               <div style="display:flex;align-items:center;gap:8px">
                 <button class="hist-btn" id="btn-lyrics-hist" title="Recent lyrics">
                   <svg viewBox="0 0 16 16" fill="none" width="13" height="13"><circle cx="8" cy="8" r="6.5" stroke="currentColor" stroke-width="1.3"/><path d="M8 5v3.5l2 2" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>
-                  History
+                  <span data-i18n="btn_history">History</span>
                 </button>
                 <div class="lang-selector" id="lang-selector">
                   <button class="lang-btn active" data-lang="en" title="English">EN</button>
@@ -269,6 +269,17 @@
               <button class="tag" data-style="trap">trap</button>
               <button class="tag" data-style="dreamy">dreamy</button>
               <button class="tag" data-style="dark">dark</button>
+            </div>
+          </div>
+
+          <!-- Vocals -->
+          <div class="vocal-row">
+            <span class="label-muted small" data-i18n="label_vocals">Vocals</span>
+            <div class="vocal-selector" id="vocal-selector">
+              <button class="vocal-btn active" data-vocal="auto" data-i18n="vocal_auto">Auto</button>
+              <button class="vocal-btn" data-vocal="female" data-i18n="vocal_female">Female</button>
+              <button class="vocal-btn" data-vocal="male" data-i18n="vocal_male">Male</button>
+              <button class="vocal-btn" data-vocal="mixed" data-i18n="vocal_mixed">Mixed</button>
             </div>
           </div>
 
@@ -589,17 +600,17 @@
                   </svg>
                 </button>
                 <div class="vs-body hidden" id="vs-body">
-                  <p class="vs-hint">Assign a different voice to each section of the song.</p>
+                  <p class="vs-hint" data-i18n="vs_hint">Assign a different voice to each section of the song.</p>
                   <div id="vs-sections-list"></div>
                   <div class="vs-progress hidden" id="vs-progress">
                     <div class="vs-progress-bar"><div class="vs-progress-fill" id="vs-progress-fill"></div></div>
-                    <span class="vs-progress-msg" id="vs-progress-msg">Processing…</span>
+                    <span class="vs-progress-msg" id="vs-progress-msg" data-i18n="vs_processing">Processing…</span>
                   </div>
                   <button class="btn-apply-sections" id="btn-apply-sections" type="button">
                     <svg viewBox="0 0 16 16" fill="none" width="12" height="12">
                       <polygon points="3,2 14,8 3,14" fill="currentColor"/>
                     </svg>
-                    Apply Voice Sections
+                    <span data-i18n="btn_apply_sections">Apply Voice Sections</span>
                   </button>
                 </div>
               </div>
@@ -624,13 +635,13 @@
                   <svg viewBox="0 0 20 20" fill="none">
                     <path d="M3 5h14M3 10h9M3 15h6" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
                   </svg>
-                  <span>Stems</span>
+                  <span data-i18n="btn_stems">Stems</span>
                 </button>
                 <button class="np-action" id="btn-master" title="Normalise to -14 LUFS + true-peak limit, download as WAV">
                   <svg viewBox="0 0 20 20" fill="none">
                     <path d="M3 10h3l2-6 4 12 2-6h3" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
                   </svg>
-                  <span>Normalize</span>
+                  <span data-i18n="btn_normalize">Normalize</span>
                 </button>
                 <button class="np-action" id="btn-save">
                   <svg viewBox="0 0 20 20" fill="none">
@@ -649,7 +660,7 @@
           <div class="side-card">
             <div class="side-card-head">
               <span data-i18n="queue_title">Queue</span>
-              <span class="q-badge" id="q-badge">idle</span>
+              <span class="q-badge" id="q-badge" data-i18n="badge_idle">idle</span>
             </div>
             <div class="side-card-body" id="q-body">
               <span class="side-empty" data-i18n="queue_idle">No active generation</span>
@@ -747,15 +758,15 @@
                 </div>
                 <div class="eval-analysis hidden" id="eval-analysis-0">
                   <div class="eval-metric"><span class="eval-metric-val" id="eval-bpm-0">—</span><span
-                      class="eval-metric-lbl">BPM</span></div>
+                      class="eval-metric-lbl" data-i18n="metric_bpm">BPM</span></div>
                   <div class="eval-metric"><span class="eval-metric-val" id="eval-key-0">—</span><span
-                      class="eval-metric-lbl">Key</span></div>
+                      class="eval-metric-lbl" data-i18n="metric_key">Key</span></div>
                   <div class="eval-metric"><span class="eval-metric-val" id="eval-mood-0">—</span><span
-                      class="eval-metric-lbl">Mood</span></div>
+                      class="eval-metric-lbl" data-i18n="metric_mood">Mood</span></div>
                   <div class="eval-metric"><span class="eval-metric-val" id="eval-energy-0">—</span><span
-                      class="eval-metric-lbl">Energy</span></div>
+                      class="eval-metric-lbl" data-i18n="metric_energy">Energy</span></div>
                   <div class="eval-metric"><span class="eval-metric-val" id="eval-gentime-0">—</span><span
-                      class="eval-metric-lbl">Gen Time</span></div>
+                      class="eval-metric-lbl" data-i18n="metric_gen_time">Gen Time</span></div>
                 </div>
               </div>
             </div>
@@ -803,15 +814,15 @@
                 </div>
                 <div class="eval-analysis hidden" id="eval-analysis-1">
                   <div class="eval-metric"><span class="eval-metric-val" id="eval-bpm-1">—</span><span
-                      class="eval-metric-lbl">BPM</span></div>
+                      class="eval-metric-lbl" data-i18n="metric_bpm">BPM</span></div>
                   <div class="eval-metric"><span class="eval-metric-val" id="eval-key-1">—</span><span
-                      class="eval-metric-lbl">Key</span></div>
+                      class="eval-metric-lbl" data-i18n="metric_key">Key</span></div>
                   <div class="eval-metric"><span class="eval-metric-val" id="eval-mood-1">—</span><span
-                      class="eval-metric-lbl">Mood</span></div>
+                      class="eval-metric-lbl" data-i18n="metric_mood">Mood</span></div>
                   <div class="eval-metric"><span class="eval-metric-val" id="eval-energy-1">—</span><span
-                      class="eval-metric-lbl">Energy</span></div>
+                      class="eval-metric-lbl" data-i18n="metric_energy">Energy</span></div>
                   <div class="eval-metric"><span class="eval-metric-val" id="eval-gentime-1">—</span><span
-                      class="eval-metric-lbl">Gen Time</span></div>
+                      class="eval-metric-lbl" data-i18n="metric_gen_time">Gen Time</span></div>
                 </div>
               </div>
             </div>
@@ -859,15 +870,15 @@
                 </div>
                 <div class="eval-analysis hidden" id="eval-analysis-2">
                   <div class="eval-metric"><span class="eval-metric-val" id="eval-bpm-2">—</span><span
-                      class="eval-metric-lbl">BPM</span></div>
+                      class="eval-metric-lbl" data-i18n="metric_bpm">BPM</span></div>
                   <div class="eval-metric"><span class="eval-metric-val" id="eval-key-2">—</span><span
-                      class="eval-metric-lbl">Key</span></div>
+                      class="eval-metric-lbl" data-i18n="metric_key">Key</span></div>
                   <div class="eval-metric"><span class="eval-metric-val" id="eval-mood-2">—</span><span
-                      class="eval-metric-lbl">Mood</span></div>
+                      class="eval-metric-lbl" data-i18n="metric_mood">Mood</span></div>
                   <div class="eval-metric"><span class="eval-metric-val" id="eval-energy-2">—</span><span
-                      class="eval-metric-lbl">Energy</span></div>
+                      class="eval-metric-lbl" data-i18n="metric_energy">Energy</span></div>
                   <div class="eval-metric"><span class="eval-metric-val" id="eval-gentime-2">—</span><span
-                      class="eval-metric-lbl">Gen Time</span></div>
+                      class="eval-metric-lbl" data-i18n="metric_gen_time">Gen Time</span></div>
                 </div>
               </div>
             </div>
@@ -936,12 +947,12 @@
           <h1 data-i18n="lib_history">Track History</h1>
           <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
             <div class="lib-filter-tabs">
-              <button class="lib-filter-tab active" id="lib-tab-all">All</button>
+              <button class="lib-filter-tab active" id="lib-tab-all" data-i18n="lib_tab_all">All</button>
               <button class="lib-filter-tab" id="lib-tab-favs">
-                <svg viewBox="0 0 16 16" fill="currentColor" width="12" height="12" style="vertical-align:-1px;margin-right:3px"><path d="M8 1.5l1.8 3.6 4 .6-2.9 2.8.7 4L8 10.4l-3.6 1.9.7-4L2.2 5.7l4-.6z"/></svg>Favorites
+                <svg viewBox="0 0 16 16" fill="currentColor" width="12" height="12" style="vertical-align:-1px;margin-right:3px"><path d="M8 1.5l1.8 3.6 4 .6-2.9 2.8.7 4L8 10.4l-3.6 1.9.7-4L2.2 5.7l4-.6z"/></svg><span data-i18n="lib_tab_favs">Favorites</span>
               </button>
               <button class="lib-filter-tab" id="lib-tab-vs">
-                <svg viewBox="0 0 16 16" fill="none" width="12" height="12" style="vertical-align:-1px;margin-right:3px"><path d="M8 1a2 2 0 00-2 2v4a2 2 0 004 0V3a2 2 0 00-2-2z" fill="currentColor" opacity=".8"/><path d="M12 7v1a4 4 0 01-8 0V7" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>Voice Sections
+                <svg viewBox="0 0 16 16" fill="none" width="12" height="12" style="vertical-align:-1px;margin-right:3px"><path d="M8 1a2 2 0 00-2 2v4a2 2 0 004 0V3a2 2 0 00-2-2z" fill="currentColor" opacity=".8"/><path d="M12 7v1a4 4 0 01-8 0V7" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg><span data-i18n="lib_tab_vs">Voice Sections</span>
               </button>
             </div>
             <input type="text" id="lib-search" class="input input--mini" placeholder="Search prompts..."
@@ -955,12 +966,12 @@
         <!-- Sort / view / bulk toolbar -->
         <div class="lib-toolbar" id="lib-toolbar">
           <div class="lib-sort-pills">
-            <span class="lib-sort-label">Sort:</span>
-            <button class="lib-sort-pill active" data-sort="newest">Newest</button>
-            <button class="lib-sort-pill" data-sort="oldest">Oldest</button>
-            <button class="lib-sort-pill" data-sort="duration">Duration</button>
+            <span class="lib-sort-label" data-i18n="lib_sort_label">Sort:</span>
+            <button class="lib-sort-pill active" data-sort="newest" data-i18n="sort_newest">Newest</button>
+            <button class="lib-sort-pill" data-sort="oldest" data-i18n="sort_oldest">Oldest</button>
+            <button class="lib-sort-pill" data-sort="duration" data-i18n="param_duration">Duration</button>
             <button class="lib-sort-pill" data-sort="bpm">BPM</button>
-            <button class="lib-sort-pill" data-sort="energy">Energy</button>
+            <button class="lib-sort-pill" data-sort="energy" data-i18n="metric_energy">Energy</button>
           </div>
           <div class="lib-view-actions">
             <button class="lib-view-btn active" id="btn-view-grid" title="Grid view">
@@ -969,17 +980,17 @@
             <button class="lib-view-btn" id="btn-view-list" title="List view">
               <svg viewBox="0 0 16 16" width="14" height="14" fill="currentColor"><rect x="1" y="2" width="14" height="2" rx="1"/><rect x="1" y="7" width="14" height="2" rx="1"/><rect x="1" y="12" width="14" height="2" rx="1"/></svg>
             </button>
-            <button class="btn-ghost lib-select-btn" id="btn-bulk-toggle">Select</button>
+            <button class="btn-ghost lib-select-btn" id="btn-bulk-toggle" data-i18n="btn_select">Select</button>
           </div>
         </div>
 
         <!-- Bulk action bar -->
         <div class="lib-bulk-bar hidden" id="lib-bulk-bar">
           <span class="lib-bulk-count" id="lib-bulk-count">0 selected</span>
-          <button class="btn-ghost" id="btn-bulk-dl">↓ Download</button>
-          <button class="btn-ghost" id="btn-bulk-zip">⬇ Export ZIP</button>
-          <button class="btn-ghost lib-bulk-del-btn" id="btn-bulk-del">✕ Delete</button>
-          <button class="btn-ghost" id="btn-bulk-deselect">Clear</button>
+          <button class="btn-ghost" id="btn-bulk-dl">↓ <span data-i18n="btn_download">Download</span></button>
+          <button class="btn-ghost" id="btn-bulk-zip"><span data-i18n="btn_bulk_zip">Export ZIP</span></button>
+          <button class="btn-ghost lib-bulk-del-btn" id="btn-bulk-del">✕ <span data-i18n="btn_bulk_del">Delete</span></button>
+          <button class="btn-ghost" id="btn-bulk-deselect" data-i18n="btn_clear">Clear</button>
         </div>
 
         <div class="lib-grid" id="lib-grid">

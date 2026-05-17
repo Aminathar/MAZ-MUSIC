@@ -5,11 +5,13 @@ httpx>=0.27
 pydantic>=2.0
 python-multipart>=0.0.9
 psutil>=5.9
+python-dotenv>=1.0
 
 # ─── Audio analysis & I/O ────────────────────────────────────
 numpy>=1.24
 soundfile>=0.12
 librosa>=0.10
+pyloudnorm>=0.1
 
 # ─── Voice pipeline / stem separation (optional) ─────────────
 # Required only if you use voice conversion or the Stems Export feature.

@@ -67,7 +67,7 @@ MAZ is the orchestrator. ACE-Step is a separate process — start it first.
 
 For voice features:
 - **[Seed-VC](https://github.com/Plachtaa/seed-vc)** — required for SVC voice
-  conversion. Place at `../seed-vc/` relative to the soundforge directory, or
+  conversion. Place at `../seed-vc/` relative to the maz directory, or
   edit the path in `voice_pipeline_worker.py`.
 - **RVC model files** — `.pth` files dropped into `outputs/voice_profiles/rvc_models/`.
 
@@ -187,7 +187,7 @@ a JSON summary of what was cleaned up.
 ## Project layout
 
 ```
-soundforge/
+maz/
 ├── server.py                    # FastAPI app, queue worker, all endpoints
 ├── process_guard.py             # Subprocess lifecycle / orphan cleanup
 ├── voice_pipeline_worker.py     # Seed-VC / RVC voice conversion

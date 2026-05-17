@@ -14,9 +14,11 @@ REQUIRES:
 
 import io
 import os
+import re
 import sys
 import uuid
 import math
+import shutil
 import asyncio
 import logging
 import httpx
@@ -35,6 +37,10 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, HTMLResponse
 from pydantic import BaseModel, Field
+from dotenv import load_dotenv
+
+# Load .env from the same directory as this file before reading os.environ
+load_dotenv(Path(__file__).parent / ".env")
 
 import process_guard
 
@@ -44,6 +50,8 @@ ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "admin1234")
 MAX_PER_DAY    = int(os.environ.get("MAX_PER_DAY", "10"))
 POLL_INTERVAL  = 3.0   # seconds between ACE-Step status polls
 POLL_TIMEOUT   = 600   # hard wall-clock deadline in seconds
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")   # free key from aistudio.google.com
+GEMINI_MODEL   = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
 STATIC_DIR     = Path(__file__).parent / "static"
 OUTPUT_DIR     = Path(__file__).parent / "outputs"
 OUTPUT_DIR.mkdir(exist_ok=True)
@@ -59,6 +67,8 @@ VOICE_PIPELINE        = Path(__file__).parent / "voice_pipeline_worker.py"
 VOICE_SECTIONS_WORKER = Path(__file__).parent / "voice_sections_worker.py"
 VOICE_SECTIONS_DIR    = OUTPUT_DIR / "voice_sections"
 VOICE_SECTIONS_DIR.mkdir(parents=True, exist_ok=True)
+AUDIO_STORE_DIR = OUTPUT_DIR / "audio"
+AUDIO_STORE_DIR.mkdir(parents=True, exist_ok=True)
 VOICE_TRAIN_WORKER  = Path(__file__).parent / "rvc_training_worker.py"
 RVC_DATASETS_DIR    = VOICE_PROFILES_DIR / "training_datasets"
 RVC_TRAINING_OUTPUT = VOICE_PROFILES_DIR / "trained_models"
@@ -145,7 +155,21 @@ def init_db():
     log.info(f"Database initialized: {DB_PATH}")
 
 def save_track_to_db(job: dict, audio_path: str):
-    """Save a completed track to the database."""
+    """Save a completed track to the database, copying audio to permanent storage."""
+    job_id = job["job_id"]
+    # Copy audio from ACE-Step temp dir to permanent store so library tracks always work
+    if audio_path:
+        src = Path(audio_path)
+        if src.exists() and src.stat().st_size > 1000:
+            dest = AUDIO_STORE_DIR / f"{job_id}{src.suffix}"
+            if not dest.exists():
+                try:
+                    shutil.copy2(str(src), str(dest))
+                    log.info(f"Audio stored permanently: {dest.name}")
+                except Exception as e:
+                    log.warning(f"Could not copy audio to permanent store: {e}")
+            if dest.exists():
+                audio_path = str(dest)
     try:
         with sqlite3.connect(DB_PATH) as conn:
             conn.execute("""
@@ -154,7 +178,7 @@ def save_track_to_db(job: dict, audio_path: str):
                  bpm_input, key_input, audio_path, ip)
                 VALUES (?,?,?,?,?,?,?,?,?,?,?)
             """, (
-                job["job_id"],
+                job_id,
                 job["prompt"],
                 job.get("lyrics"),
                 job.get("duration"),
@@ -167,7 +191,7 @@ def save_track_to_db(job: dict, audio_path: str):
                 job.get("ip"),
             ))
             conn.commit()
-        log.info(f"Track saved to DB: {job['job_id']}")
+        log.info(f"Track saved to DB: {job_id}")
     except Exception as e:
         log.error(f"DB save error: {e}")
 
@@ -228,6 +252,7 @@ class GenerateRequest(BaseModel):
     key:            Optional[str] = Field(None)
     language:       Optional[str] = Field("en")
     voice_id:       Optional[str] = Field(None)
+    vocal_gender:   Optional[str] = Field("auto")  # auto | female | male | mixed
 
 class QueueResponse(BaseModel):
     job_id:    str
@@ -235,6 +260,24 @@ class QueueResponse(BaseModel):
     estimated_wait_minutes: float
 
 # ─── Helpers ──────────────────────────────────────────────────
+_VOCAL_GENDER_TAGS = {
+    "female": "female vocals",
+    "male":   "male vocals",
+    "mixed":  "male and female vocals",
+}
+_VOCAL_STRIP_RE = re.compile(
+    r'\b(male and female|female|male)\s+vocals?\b[,\s]*',
+    re.IGNORECASE,
+)
+
+def _apply_vocal_gender(prompt: str, gender: Optional[str]) -> str:
+    """Prepend the chosen vocal gender tag, stripping any existing gender term first."""
+    tag = _VOCAL_GENDER_TAGS.get(gender or "auto")
+    if not tag:
+        return prompt
+    cleaned = _VOCAL_STRIP_RE.sub("", prompt).strip().strip(",").strip()
+    return f"{tag}, {cleaned}" if cleaned else tag
+
 def get_usage_key(ip: str) -> str:
     return f"{ip}::{date.today().isoformat()}"
 
@@ -290,6 +333,7 @@ def _record_finished(job_id: str, status: str, audio_url: Optional[str] = None, 
 
 def find_audio_file(task_id: str) -> Optional[Path]:
     search_dirs = [
+        AUDIO_STORE_DIR,
         Path(ACESTEP_AUDIO_DIR),
         Path(__file__).parent.parent / "ACE-Step-1.5" / ".cache" / "acestep" / "tmp" / "api_audio",
     ]
@@ -443,6 +487,7 @@ async def queue_worker():
                 "batch_size":      1,
                 "use_erg_tag":     True,
                 "use_cot_metas":   True,
+                "use_cot_caption": False,  # Preserve user's caption verbatim; LLM rewrites drop gender terms
                 "lm_mode":         "think",
             }
             if job.get("bpm"):       payload["bpm"]       = job["bpm"]
@@ -704,28 +749,31 @@ async def health():
 @app.get("/ai/status")
 async def ai_status():
     """Check if Ollama is running and which model will be used for AI features."""
+    gemini_info = {"gemini_available": bool(GEMINI_API_KEY), "gemini_model": GEMINI_MODEL if GEMINI_API_KEY else None}
     try:
         async with httpx.AsyncClient(timeout=4) as client:
             r = await client.get("http://localhost:11434/api/tags")
         if r.status_code != 200:
-            return {"available": False, "reason": "Ollama returned unexpected status", "model": None, "models": []}
+            return {"available": False, "reason": "Ollama returned unexpected status", "model": None, "models": [], **gemini_info}
         installed = [m["name"] for m in r.json().get("models", [])]
         model = await _pick_local_model()
         if model:
-            return {"available": True, "model": model, "models": installed, "reason": None}
+            return {"available": True, "model": model, "models": installed, "reason": None, **gemini_info}
         else:
             return {
-                "available": False,
+                "available": bool(GEMINI_API_KEY),
                 "model": None,
                 "models": [],
-                "reason": "No models installed. Run: ollama pull mistral",
+                "reason": "No local models installed. Run: ollama pull qwen3:8b",
+                **gemini_info,
             }
     except Exception as e:
         return {
-            "available": False,
+            "available": bool(GEMINI_API_KEY),
             "model": None,
             "models": [],
             "reason": f"Ollama not running. Install from https://ollama.ai — {e}",
+            **gemini_info,
         }
 
 @app.get("/usage")
@@ -742,7 +790,7 @@ async def generate(req: GenerateRequest, request: Request):
     job = {
         "job_id":         str(uuid.uuid4()),
         "ip":             ip,
-        "prompt":         req.prompt,
+        "prompt":         _apply_vocal_gender(req.prompt, req.vocal_gender),
         "lyrics":         req.lyrics,
         "duration":       req.duration,
         "guidance_scale": req.guidance_scale,
@@ -1011,31 +1059,35 @@ async def download_track_fmt(task_id: str, format: str = "wav"):
 
 
 def _master_audio(src: Path) -> bytes:
-    """Normalise loudness to -14 LUFS equivalent and apply true-peak limiting.
+    """Normalise loudness to -14 LUFS (ITU-R BS.1770-4) and apply true-peak limiting.
 
-    Uses a simplified integrated-loudness estimate (RMS-to-LUFS mapping) so
-    there is no extra dependency beyond numpy and soundfile.
+    Uses pyloudnorm for accurate integrated loudness measurement.
     Returns WAV bytes of the mastered file.
     """
     import io as _io
     import numpy as np
     import soundfile as sf
+    import pyloudnorm as pyln
 
     data, sr = sf.read(str(src), always_2d=True)   # (samples, channels)
 
-    # RMS-based loudness estimate → target -14 LUFS (≈ -14 dBFS RMS for music)
-    TARGET_LUFS  = -14.0
-    rms          = float(np.sqrt(np.mean(data ** 2)) + 1e-9)
-    current_lufs = 20.0 * math.log10(rms)
-    gain_db      = TARGET_LUFS - current_lufs
+    TARGET_LUFS = -14.0
+    meter = pyln.Meter(sr)  # ITU-R BS.1770-4 meter
+    current_lufs = meter.integrated_loudness(data)
+
+    # integrated_loudness returns -inf for silence; guard against that
+    if not math.isfinite(current_lufs):
+        current_lufs = -70.0
+
+    gain_db = TARGET_LUFS - current_lufs
     # Clamp: never boost more than +12 dB or cut more than -24 dB
-    gain_db      = max(-24.0, min(12.0, gain_db))
-    gain_linear  = 10 ** (gain_db / 20.0)
-    data         = data * gain_linear
+    gain_db = max(-24.0, min(12.0, gain_db))
+    gain_linear = 10 ** (gain_db / 20.0)
+    data = data * gain_linear
 
     # True-peak limiter at -1 dBFS
     TP_CEIL = 10 ** (-1.0 / 20.0)
-    peak    = float(np.max(np.abs(data)))
+    peak = float(np.max(np.abs(data)))
     if peak > TP_CEIL:
         data = data * (TP_CEIL / peak)
 
@@ -1182,6 +1234,7 @@ from pydantic import BaseModel as BM
 class AIRequest(BM):
     prompt: str
     language: Optional[str] = None   # ISO-639-1 hint: "kk", "ru", "en", etc.
+    mode: Optional[str] = "lyrics"   # "lyrics" or "enhance"
 
 # ─── Ollama auto-pull ─────────────────────────────────────────
 # Default preference list (English-first workloads).
@@ -1202,14 +1255,10 @@ _LOCAL_MODEL_PREFERENCE = [
 ]
 
 # Kazakh and Russian lyrics require a model with strong multilingual coverage.
-# Cloud models (deepseek-v3.1:671b-cloud, kimi-k2.5:cloud) are ranked first —
-# at 671B+ parameters they handle Kazakh far better than any local model.
-# qwen3:8b is the best local/offline fallback (pull with: ollama pull qwen3:8b).
+# qwen3:8b is the best local model for Kazakh (pull with: ollama pull qwen3:8b).
 # qwen3 and deepseek-r1 use <think>...</think> tags which are stripped below.
 # mistral is ranked last — it produces gibberish in Kazakh.
 _MULTILINGUAL_MODEL_PREFERENCE = [
-    "deepseek-v3.1:671b-cloud",
-    "kimi-k2.5:cloud",
     "qwen3:8b",
     "qwen3:4b",
     "qwen2.5:7b",
@@ -1225,39 +1274,56 @@ _MULTILINGUAL_MODEL_PREFERENCE = [
     "smollm2:1.7b",
 ]
 
-async def _pick_local_model(language: str = "") -> Optional[str]:
+async def _pick_local_models(language: str = "") -> list[str]:
     """
-    Query Ollama for installed models and return the best one.
-    For Kazakh (kk) and Russian (ru), prefers cloud models (deepseek-v3.1,
-    kimi-k2.5) then qwen3 as offline fallback. Returns None if Ollama is
-    unreachable.
+    Query Ollama for installed models and return them in preference order.
+    For Kazakh (kk), uses a multilingual-optimised ranking (qwen3 first).
+    All models are local — no cloud models are used.
+    Returns an empty list if Ollama is unreachable.
     """
-    # Cloud-first only for Kazakh (cloud models handle it far better than local ones).
-    # All other languages — including custom — use local models; qwen3:8b handles them well.
+    # Non-Latin-script and multilingual languages use the multilingual ranking
+    # (qwen first, mistral last — mistral produces gibberish in Kazakh/Russian/Turkish).
+    _MULTILINGUAL_LANGS = {"kk", "kazakh", "ru", "russian", "tr", "turkish",
+                           "zh", "chinese", "ja", "japanese", "ko", "korean",
+                           "ar", "arabic", "he", "hebrew", "uk", "ukrainian"}
     preference = (
         _MULTILINGUAL_MODEL_PREFERENCE
-        if language in ("kk", "kazakh")
+        if language in _MULTILINGUAL_LANGS
         else _LOCAL_MODEL_PREFERENCE
     )
     try:
         async with httpx.AsyncClient(timeout=4) as client:
             r = await client.get("http://localhost:11434/api/tags")
         if r.status_code != 200:
-            return None
+            return []
         installed_names = [m["name"] for m in r.json().get("models", [])]
         log.info(f"Ollama installed models: {installed_names} (language hint: '{language}')")
-        # Match by full name first, then by base name prefix
+        # Build ordered list: preferred models first, then any remaining installed
+        ordered: list[str] = []
+        seen: set[str] = set()
         for preferred in preference:
             for installed in installed_names:
-                if installed == preferred or installed.startswith(preferred.split(":")[0] + ":"):
-                    return installed
-        # If none matched the preference list, just use whatever is installed first
-        if installed_names:
-            log.info(f"No preferred model found, using: {installed_names[0]}")
-            return installed_names[0]
+                if installed not in seen and (
+                    installed == preferred
+                    or installed.startswith(preferred.split(":")[0] + ":")
+                ):
+                    ordered.append(installed)
+                    seen.add(installed)
+        # Append any installed models not in the preference list
+        for installed in installed_names:
+            if installed not in seen:
+                ordered.append(installed)
+                seen.add(installed)
+        return ordered
     except Exception as e:
         log.info(f"Ollama unreachable: {e}")
-    return None
+    return []
+
+
+async def _pick_local_model(language: str = "") -> Optional[str]:
+    """Convenience wrapper: return the single best model, or None."""
+    models = await _pick_local_models(language)
+    return models[0] if models else None
 
 
 # The model to auto-pull if none is installed.
@@ -1328,18 +1394,190 @@ async def _auto_pull_ollama_model():
         log.info(f"[AI] To pull manually, run:  ollama pull {_AUTO_PULL_MODEL}")
 
 
+# ─── Gemini API (free tier) for high-quality Kazakh lyrics ────
+async def _call_gemini(prompt: str, system_prompt: str) -> Optional[str]:
+    """Call Gemini REST API. Returns generated text or None on failure."""
+    if not GEMINI_API_KEY:
+        return None
+    url = (
+        f"https://generativelanguage.googleapis.com/v1beta/models/"
+        f"{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
+    )
+    body = {
+        "system_instruction": {"parts": [{"text": system_prompt}]},
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {
+            "temperature": 0.9,
+            "maxOutputTokens": 4096,
+        },
+    }
+    try:
+        async with httpx.AsyncClient(timeout=60) as client:
+            r = await client.post(url, json=body)
+        if r.status_code == 200:
+            data = r.json()
+            text = (
+                data.get("candidates", [{}])[0]
+                .get("content", {})
+                .get("parts", [{}])[0]
+                .get("text", "")
+                .strip()
+            )
+            if text:
+                log.info(f"Gemini response ({GEMINI_MODEL}): {len(text)} chars")
+                return text
+            log.warning("Gemini returned empty text")
+        else:
+            detail = ""
+            try:
+                detail = r.json().get("error", {}).get("message", "")[:120]
+            except Exception:
+                pass
+            log.warning(f"Gemini HTTP {r.status_code}: {detail}")
+    except Exception as e:
+        log.warning(f"Gemini call failed: {type(e).__name__}: {e}")
+    return None
+
+
+def _build_lyrics_prompt(user_prompt: str) -> str:
+    """Wrap any user prompt into an explicit full-song lyrics request."""
+    return (
+        f"Write complete, full-length song lyrics based on this idea: {user_prompt}\n\n"
+        "Required structure — write every section in full, no placeholders:\n"
+        "[Verse 1] — 6-8 lines\n"
+        "[Chorus] — 4-6 lines (repeated feel, hook)\n"
+        "[Verse 2] — 6-8 lines (new imagery, same theme)\n"
+        "[Chorus] — 4-6 lines\n"
+        "[Bridge] — 4-6 lines (emotional shift or contrast)\n"
+        "[Chorus] — 4-6 lines\n"
+        "[Outro] — 2-4 lines\n\n"
+        "Output ONLY the lyrics with section labels. No explanations, no commentary."
+    )
+
+
 @app.post("/ai/generate")
 async def ai_generate(req: AIRequest):
     """
-    Routes AI requests to a locally installed Ollama model.
-    Works 100% offline — no cloud routing, no internet required.
+    Routes AI requests to Gemini (for Kazakh) or local Ollama models.
+    Kazakh: tries Gemini free API first (much better quality), falls back to Ollama.
+    All other languages: uses local Ollama models only.
     Requires Ollama running: https://ollama.ai
-    Pull a model first:  ollama pull qwen3:8b  (best Kazakh/Russian support)
+    Pull a model first:  ollama pull qwen3:8b
     """
     lang = (req.language or "").lower().strip()
-    model = await _pick_local_model(language=lang)
+    is_enhance = (req.mode or "lyrics") == "enhance"
 
-    if not model:
+    # Enhance mode: pass the prompt straight through with no lyrics wrapping.
+    if is_enhance:
+        final_prompt = req.prompt
+        system_prompt = "You are a helpful AI assistant. Follow the instructions in the user message exactly."
+        models = await _pick_local_models(language="")
+        if not models:
+            if GEMINI_API_KEY:
+                result = await _call_gemini(final_prompt, system_prompt)
+                if result:
+                    return {"result": result, "source": f"gemini/{GEMINI_MODEL}"}
+            raise HTTPException(status_code=503, detail=(
+                "No local AI model found. Install Ollama from https://ollama.ai, then run: ollama pull qwen3:8b"
+            ))
+        last_error = None
+        for model in models:
+            log.info(f"AI enhance: model={model}")
+            try:
+                async with httpx.AsyncClient(timeout=120) as client:
+                    r = await client.post("http://localhost:11434/api/generate", json={
+                        "model": model, "prompt": final_prompt,
+                        "system": system_prompt, "stream": False, "think": False,
+                    })
+                if r.status_code == 200:
+                    import re
+                    result = re.sub(r'<think>.*?</think>', '', r.json().get("response", ""), flags=re.DOTALL).strip()
+                    return {"result": result, "source": f"ollama/{model}"}
+                last_error = f"Ollama returned {r.status_code}"
+            except Exception as e:
+                last_error = str(e)
+        raise HTTPException(status_code=502, detail=f"All AI models failed. Last error: {last_error}")
+
+    # Always request full structured lyrics regardless of how the prompt was phrased.
+    lyrics_prompt = _build_lyrics_prompt(req.prompt)
+
+    # Language-specific system prompts.
+    # Kazakh gets a dedicated prompt because generic songwriter prompts produce
+    # transliterated or mixed-language output from most small models.
+    if lang in ("kk", "kazakh"):
+        system_prompt = (
+            "Сен — кәсіби қазақ тілінде жазатын ақын және әнші. "
+            "Сенің міндетің — тек қазақ тілінде, дұрыс грамматикамен, шынайы қазақ сөздерімен толық ән мәтіні жазу. "
+            "Міндетті құрылым: [Verse 1], [Chorus], [Verse 2], [Chorus], [Bridge], [Chorus], [Outro] — әр бөлімді толық жаз. "
+            "Ережелер: "
+            "1. Тек қазақ тілінде жаз — орысша, ағылшынша немесе аралас тілде жазуға тыйым салынады. "
+            "2. Нақты қазақ сөздерін қолдан — транслитерация немесе орысша сөздерді қазақша жазу болмасын. "
+            "3. Ұйқас схемасын сақта (AABB немесе ABAB) — жолдардың соңы ұйқасуы керек. "
+            "4. Қазақ тіліне тән жалғаулар мен сөз тіркестерін қолдан (мысалы: -дай/-дей, -лы/-лі, -ған/-ген). "
+            "5. Ешқандай түсіндірме, аударма немесе комментарий жазба — тек ән мәтіні. "
+            "6. Толық аяқталған мәтін жаз — ешқашан бос орын немесе нұсқаулар қалдырма. "
+            "7. Кем дегенде 3-4 минуттық ән үшін жеткілікті ұзындықта жаз. "
+            "Тек ән мәтінін шығар, басқа ештеңе емес."
+        )
+    elif lang in ("ru", "russian"):
+        system_prompt = (
+            "Ты — профессиональный русскоязычный поэт и автор текстов песен. "
+            "Пиши только на русском языке с богатой образностью и чёткой рифмовкой. "
+            "Обязательная структура: [Verse 1], [Chorus], [Verse 2], [Chorus], [Bridge], [Chorus], [Outro] — каждую секцию пиши полностью. "
+            "Правила: используй только русский язык, соблюдай схему рифм (AABB или ABAB), "
+            "пиши живые эмоциональные строки подходящие для пения. "
+            "Пиши достаточно длинный текст — не менее 7 секций для 3-4 минутной песни. "
+            "Никаких объяснений, переводов или комментариев — только текст песни. "
+            "Выводи только текст песни, ничего больше."
+        )
+    elif lang in ("tr", "turkish"):
+        system_prompt = (
+            "Sen profesyonel bir Türkçe şair ve söz yazarısın. "
+            "Yalnızca Türkçe yaz — İngilizce, Rusça veya başka bir dilde kelime kullanma. "
+            "Zorunlu yapı: [Verse 1], [Chorus], [Verse 2], [Chorus], [Bridge], [Chorus], [Outro] — her bölümü tam yaz. "
+            "Kurallar: "
+            "1. Tüm sözler saf Türkçe olmalı — yabancı kelime veya transliterasyon yasak. "
+            "2. Güçlü bir kafiye düzeni kur (AABB veya ABAB) ve her dizede doğal bir hece ritmi sağla. "
+            "3. Türkçe'ye özgü ekleri kullan: -lar/-ler, -da/-de, -ın/-in, -mak/-mek, -dı/-di vb. "
+            "4. Duygusal, özgün ve şarkıya uygun dizeler yaz. "
+            "5. 3-4 dakikalık bir şarkı için yeterli uzunlukta yaz — en az 7 bölüm. "
+            "6. Hiçbir açıklama, çeviri veya yorum ekleme — yalnızca şarkı sözleri. "
+            "7. Tam ve bitmiş bir metin yaz — asla boş yer veya talimat bırakma. "
+            "Yalnızca şarkı sözlerini yaz, başka hiçbir şey değil."
+        )
+    else:
+        lang_display = lang.title() if lang else "English"
+        system_prompt = (
+            f"You are a professional songwriter and lyricist. "
+            f"Write song lyrics ONLY in {lang_display}. "
+            f"Do NOT use English or any other language — every single word must be in {lang_display}. "
+            f"Use authentic vocabulary, natural rhyme schemes, and cultural style native to {lang_display}. "
+            f"Always write a complete, full-length song with all sections: "
+            f"[Verse 1], [Chorus], [Verse 2], [Chorus], [Bridge], [Chorus], [Outro]. "
+            f"Each verse must be 6-8 lines, chorus 4-6 lines, bridge 4-6 lines. "
+            f"Write enough content for a 3-4 minute song — never truncate or leave placeholders. "
+            f"Never add translations, explanations, commentary, or placeholder text. "
+            f"Output ONLY the song lyrics with section labels, nothing else."
+        )
+
+    # ── Kazakh: try Gemini first (much better quality) ────────
+    if lang in ("kk", "kazakh") and GEMINI_API_KEY:
+        log.info(f"AI generate: trying Gemini ({GEMINI_MODEL}) for Kazakh")
+        result = await _call_gemini(lyrics_prompt, system_prompt)
+        if result:
+            return {"result": result, "source": f"gemini/{GEMINI_MODEL}"}
+        log.info("Gemini unavailable, falling back to local Ollama")
+
+    # ── Local Ollama (all languages, or Kazakh fallback) ──────
+    models = await _pick_local_models(language=lang)
+
+    if not models:
+        # Last resort: use Gemini for any language if no local model is available
+        if GEMINI_API_KEY:
+            log.info(f"No local models — falling back to Gemini for language '{lang}'")
+            result = await _call_gemini(lyrics_prompt, system_prompt)
+            if result:
+                return {"result": result, "source": f"gemini/{GEMINI_MODEL}"}
         raise HTTPException(
             status_code=503,
             detail=(
@@ -1349,84 +1587,44 @@ async def ai_generate(req: AIRequest):
             ),
         )
 
-    # Language-specific system prompts.
-    # Kazakh gets a dedicated prompt because generic songwriter prompts produce
-    # transliterated or mixed-language output from most small models.
-    if lang in ("kk", "kazakh"):
-        system_prompt = (
-            "Сен — кәсіби қазақ тілінде жазатын ақын және әнші. "
-            "Сенің міндетің — тек қазақ тілінде, дұрыс грамматикамен, шынайы қазақ сөздерімен ән мәтіні жазу. "
-            "Ережелер: "
-            "1. Тек қазақ тілінде жаз — орысша, ағылшынша немесе аралас тілде жазуға тыйым салынады. "
-            "2. Нақты қазақ сөздерін қолдан — транслитерация немесе орысша сөздерді қазақша жазу болмасын. "
-            "3. Ұйқас схемасын сақта (AABB немесе ABAB) — жолдардың соңы ұйқасуы керек. "
-            "4. Қазақ тіліне тән жалғаулар мен сөз тіркестерін қолдан (мысалы: -дай/-дей, -лы/-лі, -ған/-ген). "
-            "5. Ешқандай түсіндірме, аударма немесе комментарий жазба — тек ән мәтіні. "
-            "6. Толық аяқталған мәтін жаз — ешқашан бос орын немесе нұсқаулар қалдырма. "
-            "Тек ән мәтінін шығар, басқа ештеңе емес."
-        )
-    elif lang in ("ru", "russian"):
-        system_prompt = (
-            "Ты — профессиональный русскоязычный поэт и автор текстов песен. "
-            "Пиши только на русском языке с богатой образностью и чёткой рифмовкой. "
-            "Правила: используй только русский язык, соблюдай схему рифм (AABB или ABAB), "
-            "пиши живые эмоциональные строки подходящие для пения. "
-            "Никаких объяснений, переводов или комментариев — только текст песни. "
-            "Выводи только текст песни, ничего больше."
-        )
-    elif lang in ("tr", "turkish"):
-        system_prompt = (
-            "Sen profesyonel bir Türkçe şair ve söz yazarısın. "
-            "Yalnızca Türkçe yaz — İngilizce, Rusça veya başka bir dilde kelime kullanma. "
-            "Kurallar: "
-            "1. Tüm sözler saf Türkçe olmalı — yabancı kelime veya transliterasyon yasak. "
-            "2. Güçlü bir kafiye düzeni kur (AABB veya ABAB) ve her dizede doğal bir hece ritmi sağla. "
-            "3. Türkçe'ye özgü ekleri kullan: -lar/-ler, -da/-de, -ın/-in, -mak/-mek, -dı/-di vb. "
-            "4. Duygusal, özgün ve şarkıya uygun dizeler yaz. "
-            "5. Hiçbir açıklama, çeviri veya yorum ekleme — yalnızca şarkı sözleri. "
-            "6. Tam ve bitmiş bir metin yaz — asla boş yer veya talimat bırakma. "
-            "Yalnızca şarkı sözlerini yaz, başka hiçbir şey değil."
-        )
-    else:
-        lang_display = lang.title() if lang else "the requested language"
-        system_prompt = (
-            f"You are a professional songwriter and lyricist. "
-            f"Write song lyrics ONLY in {lang_display}. "
-            f"Do NOT use English or any other language — every single word must be in {lang_display}. "
-            f"Use authentic vocabulary, natural rhyme schemes, and cultural style native to {lang_display}. "
-            f"You always write complete, full-length song lyrics (at least 5 sections) suitable for a 3-4 minute song. "
-            f"Never add translations, explanations, commentary, or placeholder text. "
-            f"Output ONLY the song lyrics, nothing else."
-        )
+    # Try each model in preference order; fall back on failure
+    last_error = None
+    for model in models:
+        log.info(f"AI generate: model={model} language='{lang}'")
+        try:
+            async with httpx.AsyncClient(timeout=300) as client:
+                r = await client.post(
+                    "http://localhost:11434/api/generate",
+                    json={
+                        "model": model,
+                        "prompt": lyrics_prompt,
+                        "system": system_prompt,
+                        "stream": False,
+                        "think": False,
+                    },
+                )
+            if r.status_code == 200:
+                result = r.json().get("response", "").strip()
 
-    log.info(f"AI generate: model={model} language='{lang}'")
+                import re
+                result = re.sub(r'<think>.*?</think>', '', result, flags=re.DOTALL).strip()
 
-    try:
-        async with httpx.AsyncClient(timeout=300) as client:
-            r = await client.post(
-                "http://localhost:11434/api/generate",
-                json={
-                    "model": model,
-                    "prompt": req.prompt,
-                    "system": system_prompt,
-                    "stream": False,
-                    "think": False,
-                },
-            )
-        if r.status_code == 200:
-            result = r.json().get("response", "").strip()
+                log.info(f"AI response from model '{model}' ({len(result)} chars)")
+                return {"result": result, "source": f"ollama/{model}"}
+            else:
+                log.warning(f"Model '{model}' returned HTTP {r.status_code}, trying next model...")
+                last_error = f"Ollama returned {r.status_code} for model '{model}'"
+                continue
+        except HTTPException:
+            raise
+        except Exception as e:
+            log.warning(f"Model '{model}' failed: {type(e).__name__}: {e}, trying next model...")
+            last_error = f"{type(e).__name__}: {e}"
+            continue
 
-            import re
-            result = re.sub(r'<think>.*?</think>', '', result, flags=re.DOTALL).strip()
-
-            log.info(f"AI response from local model '{model}' ({len(result)} chars)")
-            return {"result": result, "source": f"ollama/{model}"}
-        raise HTTPException(status_code=502, detail=f"Ollama returned {r.status_code}")
-    except HTTPException:
-        raise
-    except Exception as e:
-        log.error(f"Ollama generation failed: {type(e).__name__}: {e}")
-        raise HTTPException(status_code=504, detail=f"AI generation timed out or failed: {type(e).__name__}")
+    # All models failed
+    log.error(f"All {len(models)} models failed. Last error: {last_error}")
+    raise HTTPException(status_code=502, detail=f"All AI models failed. Last error: {last_error}")
 
 # ─── Audio Analysis (librosa) ─────────────────────────────────
 def _run_analysis(audio_path: Path) -> dict:
@@ -1561,8 +1759,8 @@ def _run_stems(audio_path: Path) -> bytes:
         sep = Separator(output_dir=str(sep_dir), output_format="WAV", log_level=30)
         sep.load_model("model_bs_roformer_ep_317_sdr_12.9755.ckpt")
         out_files = sep.separate(str(audio_path))
-        voc_files = [Path(f) for f in out_files if "(Vocals)" in Path(f).name]
-        ins_files = [Path(f) for f in out_files if "(Instrumental)" in Path(f).name]
+        voc_files = [sep_dir / Path(f).name for f in out_files if "(Vocals)" in f]
+        ins_files = [sep_dir / Path(f).name for f in out_files if "(Instrumental)" in f]
         if not voc_files: voc_files = sorted(sep_dir.glob("*(Vocals)*.wav"))
         if not ins_files: ins_files = sorted(sep_dir.glob("*(Instrumental)*.wav"))
         if voc_files and ins_files:
