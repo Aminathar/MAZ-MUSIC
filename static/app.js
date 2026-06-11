@@ -2,7 +2,7 @@ document.addEventListener('DOMContentLoaded', function () {
 
   const S = {
     jobId: null,
-    jobStarted: false, // true once job_started WS event received
+    jobStarted: false,
     lang: 'en',
     uiLang: 'en',
     track: null,
@@ -12,14 +12,74 @@ document.addEventListener('DOMContentLoaded', function () {
     timer: null,
     aiResult: null,
     aiMode: null,
-    voicing: false,   // true while voice pipeline phase is active
-    wfRegion: null,   // {startPct, endPct} when a region is selected, else null
-    reqDuration: -1,  // requested duration of the current/last generation (-1 = auto)
-    serverElapsed: null, // last `elapsed` value reported by server (seconds)
-    serverSyncMs: null,  // Date.now() when serverElapsed was last received
-    notFoundStreak: 0,   // consecutive /job/{id} 404s — used to clear stuck state
-    vocalGender: 'auto', // auto | female | male | mixed
+    voicing: false,
+    wfRegion: null,
+    reqDuration: -1,
+    serverElapsed: null,
+    serverSyncMs: null,
+    notFoundStreak: 0,
+    vocalGender: 'auto',
+    batchQueue: [],
+    radioMode: false,
+    _radioPool: [],
+    _radioHistory: [],
+    // Auth
+    user: null,
+    token: localStorage.getItem('maz_token') || null,
   };
+
+  // ── Auth helpers ────────────────────────────────────────────
+  function apiFetch(url, opts = {}) {
+    if (S.token) {
+      opts.headers = { ...(opts.headers || {}), Authorization: `Bearer ${S.token}` };
+    }
+    return fetch(url, opts).then(r => {
+      if (r.status === 401) {
+        _logout(false);
+        throw new Error('Session expired — please sign in again');
+      }
+      return r;
+    });
+  }
+
+  function _logout(notify = true) {
+    S.token = null;
+    S.user  = null;
+    localStorage.removeItem('maz_token');
+    if (notify) toast('Signed out', 'info', 2000);
+    _showLogin();
+  }
+
+  function _showLogin() {
+    $('login-overlay').classList.remove('hidden');
+  }
+  function _hideLogin() {
+    $('login-overlay').classList.add('hidden');
+  }
+
+  function _applyUser(user) {
+    S.user = user;
+    $('sidebar-user-name').textContent  = user.username;
+    $('sidebar-user-role').textContent  = user.role;
+    $('sidebar-user-avatar').textContent = user.username[0].toUpperCase();
+  }
+
+  async function _initAuth() {
+    if (!S.token) { _showLogin(); return; }
+    try {
+      const r = await apiFetch('/auth/me');
+      if (!r.ok) { _logout(false); return; }
+      const user = await r.json();
+      _applyUser(user);
+      _hideLogin();
+      connectWS();
+      loadPresets();
+      checkHealth();
+      checkAI();
+    } catch (_) {
+      _logout(false);
+    }
+  }
 
   const $ = id => document.getElementById(id);
   const $$ = s => document.querySelectorAll(s);
@@ -97,6 +157,16 @@ document.addEventListener('DOMContentLoaded', function () {
       btn.classList.add('active');
       $(`page-${btn.dataset.view}`).classList.add('active');
       if (btn.dataset.view === 'library') { renderLib(); loadStats(); }
+      // Sync mobile nav active state
+      $$('.mob-nav-btn').forEach(b => b.classList.toggle('active', b.dataset.view === btn.dataset.view));
+    });
+  });
+
+  /* Mobile nav — delegates to sidebar-item clicks */
+  $$('.mob-nav-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const sideBtn = document.querySelector(`.sidebar-item[data-view="${btn.dataset.view}"]`);
+      if (sideBtn) sideBtn.click();
     });
   });
 
@@ -112,7 +182,7 @@ document.addEventListener('DOMContentLoaded', function () {
       checkAI();   // report AI model status in the activity log
       // Re-sync job state if a job was in progress when WS dropped
       if (S.jobId) {
-        fetch(`/job/${S.jobId}`)
+        apiFetch(`/job/${S.jobId}`)
           .then(r => r.ok ? r.json() : null)
           .then(data => {
             if (!data || !S.jobId) return;
@@ -148,6 +218,7 @@ document.addEventListener('DOMContentLoaded', function () {
         if (msg.job_id !== S.jobId) break;
         S.jobStarted = true;
         setLabel('Generating');
+        setProgressBar(0.02);
         log('Generation started', 'success');
         startTimer(); // safe: guarded against double-start inside startTimer()
         break;
@@ -157,10 +228,12 @@ document.addEventListener('DOMContentLoaded', function () {
         S.serverSyncMs = Date.now();
         if (msg.status === 'applying voice') {
           S.voicing = true;
-          setLabel(`Applying voice ${msg.elapsed}s`);
+          setLabel(`Applying voice · ${msg.elapsed}s`);
+          setProgressBar(0.97);
           break;
         }
-        setLabel(`Generating ${msg.elapsed}s`);
+        setLabel(`Generating${msg.progress > 0 ? ' ' + Math.round(msg.progress * 100) + '%' : ''} · ${msg.elapsed}s`);
+        setProgressBar(msg.progress || 0);
         break;
       case 'job_completed':
         if (msg.job_id !== S.jobId) break;
@@ -172,6 +245,14 @@ document.addEventListener('DOMContentLoaded', function () {
           prompt: $('prompt').value.trim(),
           lyrics: $('lyrics').value.trim() || null,
           duration: parseInt($('duration').value),
+          auto_duration: $('auto-duration').checked,
+          guidance_scale: parseFloat($('guidance').value),
+          infer_steps: parseInt($('steps').value),
+          bpm: $('bpm').value ? parseInt($('bpm').value) : null,
+          key: $('key').value.trim() || null,
+          vocal_gender: S.vocalGender,
+          lang: S.lang,
+          style_tags: [...$$('.tag.on')].map(t => t.dataset.style),
           seed: msg.seed,
           audio_url: msg.audio_url,
           created: new Date().toISOString(),
@@ -182,6 +263,7 @@ document.addEventListener('DOMContentLoaded', function () {
         log('Track ready', 'success');
         toast('Track ready — hit play!', 'success');
         maybeNotify('Track ready!', (S.track.prompt || '').slice(0, 80) || 'Your track is ready to play.');
+        _maybeDrainBatch();
         break;
       case 'job_cancelled':
         // Server confirms cancellation — UI is already reset by abortGeneration()
@@ -195,6 +277,7 @@ document.addEventListener('DOMContentLoaded', function () {
         maybeNotify('Generation failed', (msg.error || 'Track generation failed.').slice(0, 80));
         resetBtn();
         S.jobId = null;
+        _maybeDrainBatch();
         break;
       case 'voice_sections_progress':
         if (!S.track || msg.job_id !== S.track.job_id) break;
@@ -228,11 +311,14 @@ document.addEventListener('DOMContentLoaded', function () {
     if (aj?.job_id) {
       badge.textContent = t('badge_active');
       badge.classList.add('on');
-      const pct = Math.min(90, ((aj.elapsed || 0) / 90) * 100).toFixed(1);
+      const pct = aj.progress > 0
+        ? Math.round(aj.progress * 100)
+        : Math.min(90, ((aj.elapsed || 0) / 90) * 100).toFixed(1);
+      const pctLabel = aj.progress > 0 ? ` · ${Math.round(aj.progress * 100)}%` : '';
       body.innerHTML = `
         <div class="q-active">
           <div class="q-title">${escHtml(aj.prompt || '')}</div>
-          <div class="q-meta">${aj.elapsed || 0}s · ${ql} waiting</div>
+          <div class="q-meta">${aj.elapsed || 0}s${pctLabel} · ${ql} waiting</div>
           <div class="q-bar"><div class="q-bar-fill" style="width:${pct}%"></div></div>
         </div>`;
     } else {
@@ -246,7 +332,7 @@ document.addEventListener('DOMContentLoaded', function () {
   /* Health */
   async function checkHealth() {
     try {
-      const r = await fetch('/health');
+      const r = await apiFetch('/health');
       const d = await r.json();
       const ok = d.acestep_backend === 'ok';
       $('status-dot').className = 'status-dot ' + (ok ? 'online' : 'warn');
@@ -267,7 +353,7 @@ document.addEventListener('DOMContentLoaded', function () {
     const now = Date.now();
     if (_aiStatusCache && now - _aiStatusTime < 60_000) return _aiStatusCache;
     try {
-      const r = await fetch('/ai/status');
+      const r = await apiFetch('/ai/status');
       _aiStatusCache = await r.json();
       _aiStatusTime  = now;
       if (_aiStatusCache.available) {
@@ -333,7 +419,7 @@ document.addEventListener('DOMContentLoaded', function () {
 
     async function loadHistCache() {
       try {
-        const r = await fetch('/history/prompts?limit=30');
+        const r = await apiFetch('/history/prompts?limit=30');
         if (r.ok) histCache = await r.json();
       } catch (_) {}
     }
@@ -542,10 +628,10 @@ Structure:
 
 Міндетті ережелер:
 - Әрбір жол тек қазақ тілінде болуы керек. Орысша немесе ағылшынша сөздер болмасын.
-- Нақты қазақ сөздерін қолдан: мысалы "жүрек", "күн", "жер", "арман", "махаббат", "жол", "от", "су", "аспан", "жел".
 - Ұйқас схемасы AABB (1-жол 2-жолмен, 3-жол 4-жолмен ұйқасады) немесе ABAB болуы керек.
 - Жолдар табиғи ырғақпен оқылуы керек — 7-8 буынды сақта.
-- Қазақ тіліне тән жалғауларды қолдан: -дай/-дей, -лы/-лі, -ды/-ді, -ған/-ген, -мен/-бен, -да/-де.
+- Қазақ тіліне тән жалғауларды қолдан: -дай/-дей, -лы/-лі, -ды/-ді, -ған/-ген, -мен/-бен, -да/-де, -ға/-ге, -ның/-нің.
+- Тақырыпқа сай өз сөздеріңді таңда — бекітілген сөз тізімі жоқ.
 - Ешқандай аударма, комментарий немесе түсіндірме жазба.
 - Толық аяқталған мәтін жаз — ешқашан "(мәтін осында)" сияқты нұсқаулар қалдырма.
 
@@ -669,7 +755,7 @@ Structure:
 
 
   async function callAI(prompt, language = '', signal = null, mode = 'lyrics') {
-    const res = await fetch('/ai/generate', {
+    const res = await apiFetch('/ai/generate', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ prompt, language, mode }),
@@ -771,11 +857,13 @@ Structure:
     $('gen-idle').classList.add('hidden');
     $('gen-busy').classList.remove('hidden');
     $('btn-cancel-gen').classList.remove('hidden');
+    $('gen-progress-bar')?.classList.remove('hidden');
+    setProgressBar(0);
     setLabel('Submitting');
     log(`Submitting: "${p.slice(0, 60)}${p.length > 60 ? '...' : ''}"`);
 
     try {
-      const res = await fetch('/generate', {
+      const res = await apiFetch('/generate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
@@ -805,6 +893,8 @@ Structure:
     $('gen-idle').classList.remove('hidden');
     $('gen-busy').classList.add('hidden');
     $('btn-cancel-gen').classList.add('hidden');
+    $('gen-progress-bar')?.classList.add('hidden');
+    setProgressBar(0);
     clearInterval(S.timer);
     S.timer = null;
     S.jobStarted = false;
@@ -818,10 +908,14 @@ Structure:
     S.jobId   = null;
     S.voicing = false;
     resetBtn();
-    if (jobId) fetch(`/job/${jobId}`, { method: 'DELETE' }).catch(() => {});
+    if (jobId) apiFetch(`/job/${jobId}`, { method: 'DELETE' }).catch(() => {});
   }
 
   function setLabel(t) { $('gen-label').textContent = t; }
+  function setProgressBar(fraction) {
+    const fill = $('gen-progress-fill');
+    if (fill) fill.style.width = `${Math.min(100, Math.round(fraction * 100))}%`;
+  }
   function startTimer() {
     if (S.timer) return; // already running — prevent duplicate intervals
     let t = 0;
@@ -843,7 +937,7 @@ Structure:
       // broadcast was lost (e.g. brief disconnect during completion/failure).
       if (t % 15 === 0 && S.jobId) {
         try {
-          const res = await fetch(`/job/${S.jobId}`);
+          const res = await apiFetch(`/job/${S.jobId}`);
           if (res.ok) {
             S.notFoundStreak = 0;
             const data = await res.json();
@@ -1083,7 +1177,7 @@ Structure:
     log('Applying voice sections…');
 
     try {
-      const res = await fetch('/voice/sections', {
+      const res = await apiFetch('/voice/sections', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ job_id: S.track.job_id, sections }),
@@ -1121,7 +1215,7 @@ Structure:
     const taskId = track.audio_url.split('/').pop();
 
     try {
-      const res = await fetch(`/analyze/${taskId}`);
+      const res = await apiFetch(`/analyze/${taskId}`);
       if (!res.ok) throw new Error(res.statusText);
       const a = await res.json();
 
@@ -1174,7 +1268,10 @@ Structure:
     $('t-now').textContent = fmt(audio.currentTime);
     $('bar-now').textContent = fmt(audio.currentTime);
   });
-  audio.addEventListener('ended', () => setPlaying(false));
+  audio.addEventListener('ended', () => {
+    setPlaying(false);
+    if (S.radioMode) setTimeout(_radioNext, 800);
+  });
 
   // ── Waveform — seek, drag-scrub, hover ghost + tooltip, shift+drag region ──
   (function initWaveform() {
@@ -1363,7 +1460,7 @@ Structure:
     } else {
       toast(`Converting to ${fmt.toUpperCase()}…`, 'info', 6000);
       try {
-        const r = await fetch(`/download/${taskId}?format=${fmt}`);
+        const r = await apiFetch(`/download/${taskId}?format=${fmt}`);
         if (!r.ok) throw new Error(await r.text().catch(() => r.statusText));
         const blob = await r.blob();
         const url  = URL.createObjectURL(blob);
@@ -1390,7 +1487,7 @@ Structure:
     toast('Mastering — normalising to -14 LUFS…', 'info', 10000);
     log('Mastering track…');
     try {
-      const r = await fetch(`/master/${taskId}`);
+      const r = await apiFetch(`/master/${taskId}`);
       if (!r.ok) throw new Error(await r.text().catch(() => r.statusText));
       const blob = await r.blob();
       const url  = URL.createObjectURL(blob);
@@ -1414,7 +1511,7 @@ Structure:
     toast('Separating stems — this takes ~30 seconds…', 'info', 10000);
     log('Exporting stems…');
     try {
-      const r = await fetch(`/stems/${taskId}`);
+      const r = await apiFetch(`/stems/${taskId}`);
       if (!r.ok) {
         const txt = await r.text().catch(() => r.statusText);
         throw new Error(txt);
@@ -1466,7 +1563,7 @@ Structure:
 
   async function loadStats() {
     try {
-      const r = await fetch('/history/stats');
+      const r = await apiFetch('/history/stats');
       const d = await r.json();
       if ($('stat-total')) $('stat-total').textContent = d.total_generated || 0;
       if ($('stat-avg-bpm')) $('stat-avg-bpm').textContent = d.avg_bpm ? Math.round(d.avg_bpm) : '—';
@@ -1500,7 +1597,7 @@ Structure:
       const url = search
         ? `/history?limit=50&offset=0&sort=${libSort}${filterParam}`
         : `/history?limit=${libLimit}&offset=${libOffset}&sort=${libSort}${filterParam}`;
-      const r = await fetch(url);
+      const r = await apiFetch(url);
       const d = await r.json();
 
       let tracks = d.tracks;
@@ -1561,7 +1658,7 @@ Structure:
             ${t.mood ? ` · ${t.mood}` : ''}
           </div>
           <div class="lib-card-actions">
-            <button class="lib-btn" data-a="play" data-jobid="${t.job_id}" data-audio-url="${audioUrl}" data-seed="${t.seed || 42}" data-dur="${t.duration > 0 ? t.duration : 0}" data-prompt="${escHtml(t.prompt || '')}" data-lyrics="${escHtml(t.lyrics || '')}">Play</button>
+            <button class="lib-btn" data-a="play" data-jobid="${t.job_id}" data-audio-url="${audioUrl}" data-seed="${t.seed || 42}" data-dur="${t.duration > 0 ? t.duration : 0}" data-prompt="${escHtml(t.prompt || '')}" data-lyrics="${escHtml(t.lyrics || '')}" data-guidance="${t.guidance || 7.5}" data-steps="${t.steps || 30}" data-bpm="${t.bpm_input || ''}" data-key="${escHtml(t.key_input || '')}">Play</button>
             <button class="lib-btn" data-a="dl" data-jobid="${t.job_id}" data-audio-url="${audioUrl}">DL</button>
             <button class="lib-btn" data-a="stems" data-jobid="${t.job_id}" title="Export vocals + instrumental stems">Stems</button>
             <button class="lib-btn lib-fav-btn${t.favorited ? ' active' : ''}" data-a="fav" data-jobid="${t.job_id}" data-fav="${t.favorited ? '1' : '0'}" title="${favTitle}">${favSvg}</button>
@@ -1583,7 +1680,7 @@ Structure:
           <span class="lib-list-col">${t.key || '—'}</span>
           <span class="lib-list-col lib-list-mood-col">${t.mood || '—'}</span>
           <div class="lib-list-actions">
-            <button class="lib-btn" data-a="play" data-jobid="${t.job_id}" data-audio-url="${audioUrl}" data-seed="${t.seed || 42}" data-dur="${t.duration > 0 ? t.duration : 0}" data-prompt="${escHtml(t.prompt || '')}" data-lyrics="${escHtml(t.lyrics || '')}">▶</button>
+            <button class="lib-btn" data-a="play" data-jobid="${t.job_id}" data-audio-url="${audioUrl}" data-seed="${t.seed || 42}" data-dur="${t.duration > 0 ? t.duration : 0}" data-prompt="${escHtml(t.prompt || '')}" data-lyrics="${escHtml(t.lyrics || '')}" data-guidance="${t.guidance || 7.5}" data-steps="${t.steps || 30}" data-bpm="${t.bpm_input || ''}" data-key="${escHtml(t.key_input || '')}">▶</button>
             <button class="lib-btn" data-a="dl" data-jobid="${t.job_id}" data-audio-url="${audioUrl}">↓</button>
             <button class="lib-btn" data-a="stems" data-jobid="${t.job_id}" title="Export stems">⊜</button>
             <button class="lib-btn lib-fav-btn${t.favorited ? ' active' : ''}" data-a="fav" data-jobid="${t.job_id}" data-fav="${t.favorited ? '1' : '0'}" title="${favTitle}">${favSvg}</button>
@@ -1662,6 +1759,11 @@ Structure:
               prompt: btn.dataset.prompt,
               lyrics: btn.dataset.lyrics || null,
               duration: parseFloat(btn.dataset.dur),
+              auto_duration: false,
+              guidance_scale: parseFloat(btn.dataset.guidance) || 7.5,
+              infer_steps: parseInt(btn.dataset.steps) || 30,
+              bpm: btn.dataset.bpm ? parseInt(btn.dataset.bpm) : null,
+              key: btn.dataset.key || null,
               seed: parseInt(btn.dataset.seed),
               audio_url: btn.dataset.audioUrl || `/audio/${jobId}`,
               created: new Date().toISOString(),
@@ -1691,7 +1793,7 @@ Structure:
           } else if (action === 'stems') {
             toast('Separating stems — this takes ~30 seconds…', 'info', 10000);
             try {
-              const r = await fetch(`/stems/${jobId}`);
+              const r = await apiFetch(`/stems/${jobId}`);
               if (!r.ok) throw new Error(await r.text().catch(() => r.statusText));
               const blob = await r.blob();
               const url  = URL.createObjectURL(blob);
@@ -1707,7 +1809,7 @@ Structure:
 
           } else if (action === 'fav') {
             try {
-              const res  = await fetch(`/history/${jobId}/favorite`, { method: 'PATCH' });
+              const res  = await apiFetch(`/history/${jobId}/favorite`, { method: 'PATCH' });
               const data = await res.json();
               const isFav = data.favorited;
               btn.dataset.fav = isFav ? '1' : '0';
@@ -1723,7 +1825,7 @@ Structure:
           } else if (action === 'del') {
             if (!confirm('Remove this track from history?')) return;
             try {
-              await fetch(`/history/${jobId}`, { method: 'DELETE' });
+              await apiFetch(`/history/${jobId}`, { method: 'DELETE' });
               renderLib(($('lib-search') || {}).value || '');
               loadStats();
             } catch (e) {
@@ -1761,7 +1863,7 @@ Structure:
 
               if (newTitle === currentTitle) return;
               try {
-                await fetch(`/history/${jobId}/title`, {
+                await apiFetch(`/history/${jobId}/title`, {
                   method: 'PATCH',
                   headers: { 'Content-Type': 'application/json' },
                   body: JSON.stringify({ title: newTitle }),
@@ -1818,14 +1920,33 @@ Structure:
     loadStats();
   });
 
-  // Export CSV
-  $('btn-export-csv')?.addEventListener('click', () => {
+  // ── Export helper (used by both the header button and bulk bar) ──
+  function _doExport(jobIds = null) {
+    const fmt    = $('export-format')?.value || 'csv';
+    const search = $('lib-search')?.value.trim() || '';
+    const today  = new Date().toISOString().slice(0, 10);
+
+    const params = new URLSearchParams({ format: fmt });
+    if (libFavOnly)  params.set('favorites_only', 'true');
+    if (search)      params.set('search', search);
+    if (jobIds)      params.set('job_ids', jobIds.join(','));
+
     const a = document.createElement('a');
-    a.href = '/history/export';
-    a.download = 'maz_history.csv';
+    a.href = `/history/export?${params}`;
+    a.download = `maz_export_${today}.${fmt}`;
     a.click();
+
+    const count = jobIds ? jobIds.length : libAllTracks.length;
     log(t('log_downloading'), 'success');
-    toast('Downloading...', 'info', 2000);
+    toast(`${t('export_toast')} ${count} ${count === 1 ? t('export_track') : t('export_tracks')} (${fmt.toUpperCase()})`, 'ok', 3000);
+  }
+
+  $('btn-export-csv')?.addEventListener('click', () => _doExport());
+
+  // Bulk: export selected as CSV/JSON
+  $('btn-bulk-csv')?.addEventListener('click', () => {
+    if (!libSelected.size) return;
+    _doExport([...libSelected]);
   });
 
   // Load more
@@ -1907,7 +2028,7 @@ Structure:
     const ids = [...libSelected];
     let failed = 0;
     await Promise.all(ids.map(async jobId => {
-      try { await fetch(`/history/${jobId}`, { method: 'DELETE' }); }
+      try { await apiFetch(`/history/${jobId}`, { method: 'DELETE' }); }
       catch (_) { failed++; }
     }));
     libSelected.clear();
@@ -2032,7 +2153,7 @@ Structure:
       case 'F':
         // Favourite the active track (if loaded)
         if (S.track?.job_id) {
-          fetch(`/history/${S.track.job_id}/favorite`, { method: 'PATCH' })
+          apiFetch(`/history/${S.track.job_id}/favorite`, { method: 'PATCH' })
             .then(r => r.json())
             .then(d => toast(d.favorited ? 'Added to favorites' : 'Removed from favorites', 'success', 2000))
             .catch(() => {});
@@ -2065,6 +2186,7 @@ Structure:
     jobIds: [null, null, null],
     taskIds: [null, null, null],
     genTimes: [null, null, null],
+    analyses: [null, null, null],
   };
 
   // Stop all eval audios when main audio plays and vice versa
@@ -2109,27 +2231,61 @@ Structure:
     });
   });
 
-  // Draw eval waveform
-  function drawEvalWF(idx, seed) {
+  // Draw eval waveform from actual audio PCM data.
+  // Falls back to pseudo-random bars if Web Audio decoding fails.
+  async function drawEvalWF(idx) {
     const canvas = $(`eval-wf-canvas-${idx}`);
     if (!canvas) return;
+    const audio = E.audios[idx];
+
     const dpr = window.devicePixelRatio || 1;
-    const W = canvas.parentElement.offsetWidth;
-    const H = canvas.parentElement.offsetHeight;
+    const W = canvas.parentElement.offsetWidth || 200;
+    const H = canvas.parentElement.offsetHeight || 48;
     canvas.width = W * dpr; canvas.height = H * dpr;
     canvas.style.width = W + 'px'; canvas.style.height = H + 'px';
     const ctx = canvas.getContext('2d');
     ctx.scale(dpr, dpr);
     const bars = Math.floor(W / 3.5);
     const mid = H / 2;
-    ctx.clearRect(0, 0, W, H);
-    for (let i = 0; i < bars; i++) {
-      const r = pr(seed + i * 7);
-      const h = 2 + r * (mid - 3);
-      ctx.fillStyle = `rgba(29,185,84,${0.2 + r * 0.35})`;
-      ctx.beginPath();
-      ctx.roundRect(i * (W / bars), mid - h, W / bars - 1.5, h * 2, 2);
-      ctx.fill();
+
+    const drawFallback = () => {
+      ctx.clearRect(0, 0, W, H);
+      for (let i = 0; i < bars; i++) {
+        const r = pr(idx * 1000 + i * 7);
+        const h = 2 + r * (mid - 3);
+        ctx.fillStyle = `rgba(29,185,84,${0.2 + r * 0.35})`;
+        ctx.beginPath();
+        ctx.roundRect(i * (W / bars), mid - h, W / bars - 1.5, h * 2, 2);
+        ctx.fill();
+      }
+    };
+
+    if (!audio?.src) { drawFallback(); return; }
+
+    try {
+      const ac = new (window.AudioContext || window.webkitAudioContext)();
+      const resp = await fetch(audio.src);
+      const ab = await resp.arrayBuffer();
+      const buf = await ac.decodeAudioData(ab);
+      ac.close();
+
+      const pcm = buf.getChannelData(0);
+      const samplesPerBar = Math.max(1, Math.floor(pcm.length / bars));
+      ctx.clearRect(0, 0, W, H);
+      for (let i = 0; i < bars; i++) {
+        let sum = 0;
+        const off = i * samplesPerBar;
+        for (let j = 0; j < samplesPerBar; j++) sum += Math.abs(pcm[off + j] || 0);
+        const amp = sum / samplesPerBar;
+        const h = Math.max(2, Math.min(mid - 2, amp * (mid - 2) * 6));
+        const r = h / (mid - 2);
+        ctx.fillStyle = `rgba(29,185,84,${0.25 + r * 0.55})`;
+        ctx.beginPath();
+        ctx.roundRect(i * (W / bars), mid - h, W / bars - 1.5, h * 2, 2);
+        ctx.fill();
+      }
+    } catch {
+      drawFallback();
     }
   }
 
@@ -2151,7 +2307,7 @@ Structure:
     const startTime = Date.now();
 
     try {
-      const res = await fetch('/generate', {
+      const res = await apiFetch('/generate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -2193,7 +2349,7 @@ Structure:
         // HTTP poll every 5s — works through WS reconnects
         const pollId = setInterval(async () => {
           try {
-            const r = await fetch(`/job/${jobId}`);
+            const r = await apiFetch(`/job/${jobId}`);
             if (!r.ok) return;
             const d = await r.json();
             if (d.status === 'completed' && d.audio_url) {
@@ -2228,7 +2384,7 @@ Structure:
       E.audios[idx].src = audioUrl;
       E.audios[idx].load();
       E.audios[idx].addEventListener('loadedmetadata', () => {
-        drawEvalWF(idx, idx * 1000 + steps);
+        drawEvalWF(idx);
       }, { once: true });
 
       drawArt($(`eval-art-${idx}`), idx * 1000 + steps, 48);
@@ -2237,9 +2393,10 @@ Structure:
       $(`eval-meta-${idx}`).textContent = `${steps} steps · ${duration}s · ${genTime}s gen time`;
 
       try {
-        const ar = await fetch(`/analyze/${E.taskIds[idx]}`);
+        const ar = await apiFetch(`/analyze/${E.taskIds[idx]}`);
         if (ar.ok) {
           const a = await ar.json();
+          E.analyses[idx] = { ...a, genTime: parseFloat(genTime) };
           $(`eval-bpm-${idx}`).textContent = Math.round(a.bpm);
           $(`eval-key-${idx}`).textContent = a.key;
           $(`eval-mood-${idx}`).textContent = a.mood;
@@ -2259,6 +2416,49 @@ Structure:
     }
   }
 
+  // Highlight per-metric winners and show a summary after all 3 variants complete.
+  function showEvalRankings() {
+    const names = ['A', 'B', 'C'];
+    const ac = E.analyses;
+    const ready = ac.filter(Boolean);
+    if (ready.length < 2) return;
+
+    // Reset highlights
+    for (let i = 0; i < 3; i++) {
+      [$(`eval-energy-${i}`), $(`eval-gentime-${i}`)].forEach(el => {
+        if (el) { el.style.color = ''; el.title = ''; }
+      });
+    }
+
+    // Best energy (highest %)
+    const energies = ac.map((a, i) => ({ i, v: a ? a.energy : -1 }));
+    const bestEnergy = energies.filter(x => x.v >= 0).reduce((a, b) => b.v > a.v ? b : a, { i: -1, v: -1 });
+    // Fastest gen time
+    const times = ac.map((a, i) => ({ i, v: a ? a.genTime : Infinity }));
+    const fastest = times.filter(x => x.v < Infinity).reduce((a, b) => b.v < a.v ? b : a, { i: -1, v: Infinity });
+
+    if (bestEnergy.i >= 0) {
+      const el = $(`eval-energy-${bestEnergy.i}`);
+      if (el) { el.style.color = 'var(--accent)'; el.title = 'Highest energy'; }
+    }
+    if (fastest.i >= 0) {
+      const el = $(`eval-gentime-${fastest.i}`);
+      if (el) { el.style.color = 'var(--accent)'; el.title = 'Fastest generation'; }
+    }
+
+    // Summary line
+    const summaryEl = $('eval-summary');
+    if (!summaryEl) return;
+    const parts = [];
+    if (bestEnergy.i >= 0) parts.push(`Variant ${names[bestEnergy.i]} most energetic (${Math.round(ac[bestEnergy.i].energy * 100)}%)`);
+    if (fastest.i >= 0 && fastest.i !== bestEnergy.i) parts.push(`Variant ${names[fastest.i]} fastest (${ac[fastest.i].genTime}s)`);
+    // Consistency check: if all completed variants share the same key, note it
+    const keys = ready.map(a => a.key);
+    if (keys.length > 1 && keys.every(k => k === keys[0])) parts.push(`all in ${keys[0]}`);
+    summaryEl.textContent = parts.join(' · ');
+    summaryEl.classList.toggle('hidden', parts.length === 0);
+  }
+
   // Run all variants sequentially
   $('btn-eval-run')?.addEventListener('click', async () => {
     const prompt = $('eval-prompt').value.trim();
@@ -2271,10 +2471,13 @@ Structure:
     }
 
     E.running = true;
+    E.analyses = [null, null, null];
     $('btn-eval-run').disabled = true;
     $('eval-run-idle').classList.add('hidden');
     $('eval-run-busy').classList.remove('hidden');
     $('eval-progress').classList.remove('hidden');
+    const evalSummaryEl = $('eval-summary');
+    if (evalSummaryEl) evalSummaryEl.classList.add('hidden');
 
     // Shared seed: all variants use the same seed so only quality settings (steps/guidance) differ.
     // This makes the comparison meaningful — the songs are the same generation, just at different quality.
@@ -2296,6 +2499,7 @@ Structure:
     $('eval-progress-fill').style.width = '100%';
     const evalRunLabelFinal = $('eval-run-label') || $('eval-progress-label');
     if (evalRunLabelFinal) evalRunLabelFinal.textContent = 'All variants complete!';
+    showEvalRankings();
     E.running = false;
     $('btn-eval-run').disabled = false;
     $('eval-run-idle').classList.remove('hidden');
@@ -2490,6 +2694,32 @@ Structure:
       modal_working: 'Working…',
       modal_discard: 'Discard',
       modal_apply: 'Apply',
+      // Presets
+      preset_load_placeholder: 'Load preset…',
+      btn_preset_save: 'Save preset',
+      preset_name_placeholder: 'Preset name…',
+      preset_save_confirm: 'Save',
+      // Batch queue
+      btn_queue: 'Queue',
+      batch_title: 'Batch Queue',
+      batch_badge_empty: 'empty',
+      batch_badge_queued: 'queued',
+      batch_empty_hint: 'Queue prompts to generate one after another',
+      btn_clear_all: 'Clear all',
+      // Variation
+      btn_vary: 'Vary',
+      // Export
+      btn_export: 'Export',
+      btn_bulk_csv: 'Export CSV',
+      export_toast: 'Exported',
+      export_track: 'track',
+      export_tracks: 'tracks',
+      // Radio / shuffle
+      btn_shuffle_play: 'Shuffle Play',
+      radio_on_toast: 'Radio mode on — shuffling library',
+      radio_off_toast: 'Radio mode off',
+      radio_empty_toast: 'No tracks in library to shuffle — generate some first',
+      radio_next_log: 'Radio',
     },
     kk: {
       nav_studio: 'Студия',
@@ -2674,6 +2904,32 @@ Structure:
       modal_working: 'Жұмыс істеуде…',
       modal_discard: 'Жою',
       modal_apply: 'Қолдану',
+      // Presets
+      preset_load_placeholder: 'Орнатуды жүктеу…',
+      btn_preset_save: 'Орнатуды сақтау',
+      preset_name_placeholder: 'Орнату атауы…',
+      preset_save_confirm: 'Сақтау',
+      // Batch queue
+      btn_queue: 'Кезекке',
+      batch_title: 'Топтық кезек',
+      batch_badge_empty: 'бос',
+      batch_badge_queued: 'кезекте',
+      batch_empty_hint: 'Промптарды кезекке қосып, бірінің артынан бірін жасаңыз',
+      btn_clear_all: 'Барлығын тазалау',
+      // Variation
+      btn_vary: 'Нұсқа',
+      // Export
+      btn_export: 'Экспорт',
+      btn_bulk_csv: 'CSV экспорт',
+      export_toast: 'Экспортталды',
+      export_track: 'трек',
+      export_tracks: 'трек',
+      // Radio / shuffle
+      btn_shuffle_play: 'Кездейсоқ ойнату',
+      radio_on_toast: 'Радио режимі қосылды',
+      radio_off_toast: 'Радио режимі өшірілді',
+      radio_empty_toast: 'Кітапханада треклер жоқ — алдымен жасаңыз',
+      radio_next_log: 'Радио',
     },
     ru: {
       nav_studio: 'Студия',
@@ -2858,6 +3114,32 @@ Structure:
       modal_working: 'Обработка…',
       modal_discard: 'Отменить',
       modal_apply: 'Применить',
+      // Presets
+      preset_load_placeholder: 'Загрузить пресет…',
+      btn_preset_save: 'Сохранить пресет',
+      preset_name_placeholder: 'Название пресета…',
+      preset_save_confirm: 'Сохранить',
+      // Batch queue
+      btn_queue: 'В очередь',
+      batch_title: 'Пакетная очередь',
+      batch_badge_empty: 'пусто',
+      batch_badge_queued: 'в очереди',
+      batch_empty_hint: 'Добавляйте промпты в очередь для последовательной генерации',
+      btn_clear_all: 'Очистить всё',
+      // Variation
+      btn_vary: 'Вариация',
+      // Export
+      btn_export: 'Экспорт',
+      btn_bulk_csv: 'Экспорт CSV',
+      export_toast: 'Экспортировано',
+      export_track: 'трек',
+      export_tracks: 'треков',
+      // Radio / shuffle
+      btn_shuffle_play: 'Случайное воспр.',
+      radio_on_toast: 'Радио режим включён',
+      radio_off_toast: 'Радио режим выключен',
+      radio_empty_toast: 'В библиотеке нет треков — сначала сгенерируйте',
+      radio_next_log: 'Радио',
     },
   };
 
@@ -2969,6 +3251,16 @@ Structure:
           : S.uiLang === 'ru' ? 'Выберите голос…'
             : 'Select voice…';
     }
+
+    // Preset select placeholder option
+    const presetSel = $('preset-select');
+    if (presetSel && presetSel.options[0] && presetSel.options[0].value === '') {
+      presetSel.options[0].textContent = t('preset_load_placeholder');
+    }
+
+    // Preset name input placeholder
+    const presetNameEl = $('preset-name');
+    if (presetNameEl) presetNameEl.placeholder = t('preset_name_placeholder');
   }
 
   // Sidebar language switcher — controls interface language only (S.uiLang)
@@ -2987,8 +3279,8 @@ Structure:
   // Apply on load
   applyTranslations();
 
-  /* Init */
-  connectWS();
+  /* Init — auth drives connection */
+  _initAuth();
 
   /* ── Voice Profiles ──────────────────────────────────────── */
   let voiceMediaRecorder   = null;
@@ -3129,7 +3421,7 @@ Structure:
   // Also populate the Studio dropdown whenever Voice tab is opened or on page load
   async function loadVoiceProfiles() {
     try {
-      const r = await fetch('/voice/profiles');
+      const r = await apiFetch('/voice/profiles');
       const d = await r.json();
       _voiceProfilesCache = d.profiles || [];
       renderVoiceProfilesList(d.profiles);
@@ -3161,7 +3453,7 @@ Structure:
     list.querySelectorAll('.voice-delete-btn').forEach(btn => {
       btn.addEventListener('click', async () => {
         const id = btn.dataset.id;
-        await fetch(`/voice/profiles/${id}`, { method: 'DELETE' });
+        await apiFetch(`/voice/profiles/${id}`, { method: 'DELETE' });
         loadVoiceProfiles();
       });
     });
@@ -3293,7 +3585,7 @@ Structure:
     form.append('type', 'svc');
 
     try {
-      const res = await fetch('/voice/register', { method: 'POST', body: form });
+      const res = await apiFetch('/voice/register', { method: 'POST', body: form });
       if (!res.ok) {
         const e = await res.json().catch(() => ({}));
         throw new Error(e.detail || res.statusText);
@@ -3334,7 +3626,7 @@ Structure:
     if (rvcIndexFile) form.append('index_file', rvcIndexFile, rvcIndexFile.name);
 
     try {
-      const res = await fetch('/voice/register', { method: 'POST', body: form });
+      const res = await apiFetch('/voice/register', { method: 'POST', body: form });
       if (!res.ok) {
         const e = await res.json().catch(() => ({}));
         throw new Error(e.detail || res.statusText);
@@ -3609,7 +3901,7 @@ Structure:
   async function pollTrainStatus() {
     if (!TR.jobId) return;
     try {
-      const r = await fetch(`/voice/train/${TR.jobId}`);
+      const r = await apiFetch(`/voice/train/${TR.jobId}`);
       if (!r.ok) return;
       const job = await r.json();
       const fill = $('train-progress-fill');
@@ -3662,7 +3954,7 @@ Structure:
     appendTrainLog(`Starting training — ${TR.files.length} file(s), ${epochs} epochs`);
 
     try {
-      const res = await fetch('/voice/train', { method: 'POST', body: form });
+      const res = await apiFetch('/voice/train', { method: 'POST', body: form });
       if (!res.ok) {
         const e = await res.json().catch(() => ({}));
         throw new Error(e.detail || res.statusText);
@@ -3683,11 +3975,491 @@ Structure:
   $('btn-stop-train')?.addEventListener('click', async () => {
     if (!TR.jobId) return;
     try {
-      await fetch(`/voice/train/${TR.jobId}`, { method: 'DELETE' });
+      await apiFetch(`/voice/train/${TR.jobId}`, { method: 'DELETE' });
       appendTrainLog('Training cancelled by user.');
       log('Voice training cancelled', 'warn');
     } catch { }
     resetTrainControls();
   });
+
+  /* ══ TRACK VARIATIONS & BATCH QUEUE ═════════════════════════ */
+
+  // Shared submit helper — used by both variation and batch drain.
+  // Sends a payload to /generate and takes over the generate UI.
+  // Does NOT touch the form fields.
+  async function _submitPayload(payload, logLabel) {
+    if (S.jobId) return;
+    $('btn-generate').disabled = true;
+    $('btn-add-batch').disabled = true;
+    $('gen-idle').classList.add('hidden');
+    $('gen-busy').classList.remove('hidden');
+    $('btn-cancel-gen').classList.remove('hidden');
+    setLabel('Submitting');
+    log(logLabel, 'ai');
+    try {
+      const res = await apiFetch('/generate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      if (res.status === 429) { const e = await res.json(); throw new Error(e.detail); }
+      if (!res.ok) { const e = await res.json().catch(() => ({})); throw new Error(e.detail || res.statusText); }
+      const data = await res.json();
+      S.jobId = data.job_id;
+      S.jobStarted = false;
+      setLabel(data.position === 1 ? 'Starting...' : `In queue #${data.position}`);
+      log(`Queued at #${data.position}`);
+      startTimer();
+    } catch (err) {
+      log(`Error: ${err.message}`, 'error');
+      toast(err.message, 'error', 4000);
+      resetBtn();
+      // Still try next batch item if one is waiting
+      setTimeout(_maybeDrainBatch, 300);
+    }
+  }
+
+  // Pop and submit the next batch item if nothing is generating.
+  function _maybeDrainBatch() {
+    if (S.jobId || S.batchQueue.length === 0) return;
+    const item = S.batchQueue.shift();
+    _renderBatch();
+    const tags = item.style_tags?.length ? item.style_tags.join(', ') : '';
+    const prompt = tags ? `${item.prompt}, ${tags}` : item.prompt;
+    _submitPayload({
+      prompt,
+      lyrics:         item.lyrics,
+      duration:       item.auto_duration ? -1 : (item.duration || 60),
+      guidance_scale: item.guidance_scale || 7.5,
+      infer_steps:    item.infer_steps || 30,
+      seed:           -1,
+      bpm:            item.bpm || null,
+      key:            item.key || null,
+      language:       item.lang || 'en',
+      vocal_gender:   item.vocal_gender || 'auto',
+    }, `Batch: "${item._label}"`);
+  }
+
+  // Render the batch queue list card.
+  function _renderBatch() {
+    const list   = $('batch-list');
+    const empty  = $('batch-empty');
+    const badge  = $('batch-badge');
+    const foot   = $('batch-foot');
+    const n = S.batchQueue.length;
+    badge.textContent = n > 0 ? `${n} ${t('batch_badge_queued')}` : t('batch_badge_empty');
+    if (n === 0) {
+      empty.classList.remove('hidden');
+      list.innerHTML = '';
+      foot.classList.add('hidden');
+      return;
+    }
+    empty.classList.add('hidden');
+    foot.classList.remove('hidden');
+    list.innerHTML = S.batchQueue.map((item, i) => `
+      <div class="batch-item">
+        <span class="batch-item-num">${i + 1}</span>
+        <span class="batch-item-label" title="${item.prompt}">${item._label}</span>
+        <button class="batch-item-rm" data-idx="${i}" title="Remove">×</button>
+      </div>
+    `).join('');
+    list.querySelectorAll('.batch-item-rm').forEach(btn => {
+      btn.addEventListener('click', () => {
+        S.batchQueue.splice(parseInt(btn.dataset.idx), 1);
+        _renderBatch();
+      });
+    });
+  }
+
+  // Collect current form state into a batch item object.
+  function _collectFormParams() {
+    const rawPrompt = $('prompt').value.trim();
+    const label = rawPrompt.slice(0, 50) + (rawPrompt.length > 50 ? '…' : '');
+    return {
+      prompt:         rawPrompt,
+      lyrics:         $('lyrics').value.trim() || null,
+      style_tags:     [...$$('.tag.on')].map(t => t.dataset.style),
+      vocal_gender:   S.vocalGender,
+      duration:       parseFloat($('duration').value),
+      auto_duration:  $('auto-duration').checked,
+      guidance_scale: parseFloat($('guidance').value),
+      infer_steps:    parseInt($('steps').value),
+      bpm:            $('bpm').value ? parseInt($('bpm').value) : null,
+      key:            $('key').value.trim() || null,
+      lang:           S.lang,
+      _label:         label || '(no prompt)',
+    };
+  }
+
+  // "Queue" button — add current form state to the batch list.
+  $('btn-add-batch').addEventListener('click', () => {
+    const p = $('prompt').value.trim();
+    if (!p) { log('Enter a prompt before queuing', 'warn'); toast('Enter a prompt first', 'warn', 2000); return; }
+    const item = _collectFormParams();
+    S.batchQueue.push(item);
+    _renderBatch();
+    log(`Queued: "${item._label}"`, 'ai');
+    toast(`Added to batch (${S.batchQueue.length} queued)`, 'ok', 2000);
+    // If nothing is generating, start immediately
+    _maybeDrainBatch();
+  });
+
+  $('btn-clear-batch')?.addEventListener('click', () => {
+    S.batchQueue = [];
+    _renderBatch();
+    toast('Batch queue cleared', 'warn', 2000);
+  });
+
+  // "Vary" button — re-submit the current track with a new random seed.
+  $('btn-vary')?.addEventListener('click', () => {
+    if (!S.track) return;
+    if (S.jobId) { toast('Wait for the current generation to finish first', 'warn', 2500); return; }
+    const t = S.track;
+    const tags = t.style_tags?.length ? t.style_tags.join(', ') : '';
+    const prompt = tags ? `${t.prompt}, ${tags}` : t.prompt;
+    _submitPayload({
+      prompt,
+      lyrics:         t.lyrics,
+      duration:       t.auto_duration ? -1 : (t.duration || 60),
+      guidance_scale: t.guidance_scale || 7.5,
+      infer_steps:    t.infer_steps || 30,
+      seed:           -1,
+      bpm:            t.bpm || null,
+      key:            t.key || null,
+      language:       t.lang || 'en',
+      vocal_gender:   t.vocal_gender || 'auto',
+    }, `Variation of: "${(t.prompt || '').slice(0, 50)}"`);
+  });
+
+  // Mirror btn-generate's disabled state onto btn-add-batch so resetBtn() re-enables both.
+  const _batchBtnObserver = new MutationObserver(() => {
+    const genDisabled = $('btn-generate').disabled;
+    $('btn-add-batch').disabled = genDisabled;
+  });
+  _batchBtnObserver.observe($('btn-generate'), { attributes: true, attributeFilter: ['disabled'] });
+
+  /* ══ SHUFFLE / RADIO MODE ════════════════════════════════════ */
+
+  async function _buildRadioPool() {
+    try {
+      const res = await apiFetch('/history?limit=200&sort=newest');
+      if (!res.ok) return false;
+      const data = await res.json();
+      S._radioPool = (data.tracks || []).filter(t => t.job_id);
+      return S._radioPool.length > 0;
+    } catch {
+      return false;
+    }
+  }
+
+  async function _radioNext() {
+    if (!S.radioMode || S._radioPool.length === 0) return;
+
+    let candidates = S._radioPool.filter(t => !S._radioHistory.includes(t.job_id));
+    if (candidates.length === 0) {
+      S._radioHistory = [];
+      candidates = S._radioPool;
+    }
+
+    const raw = candidates[Math.floor(Math.random() * candidates.length)];
+    S._radioHistory.push(raw.job_id);
+    if (S._radioHistory.length > 15) S._radioHistory.shift();
+
+    const track = {
+      id:        Date.now(),
+      job_id:    raw.job_id,
+      title:     raw.title || raw.prompt || '',
+      prompt:    raw.prompt || '',
+      lyrics:    raw.lyrics || null,
+      duration:  raw.duration,
+      seed:      raw.seed,
+      audio_url: `/audio/${raw.job_id}`,
+    };
+    S.track = track;
+    loadTrack(track);
+    audio.addEventListener('canplay', function onCanPlay() {
+      audio.removeEventListener('canplay', onCanPlay);
+      audio.play().then(() => setPlaying(true)).catch(() => {});
+    }, { once: true });
+    log(`${t('radio_next_log')}: "${(raw.prompt || '').slice(0, 50)}"`, 'ai');
+  }
+
+  function _setRadioUI(on) {
+    $('bar-shuffle').classList.toggle('radio-on', on);
+    $('btn-shuffle-lib')?.classList.toggle('radio-on', on);
+    $('np-radio-badge')?.classList.toggle('hidden', !on);
+  }
+
+  async function toggleRadio() {
+    if (S.radioMode) {
+      S.radioMode = false;
+      _setRadioUI(false);
+      toast(t('radio_off_toast'), 'warn', 1800);
+      log(t('radio_off_toast'), 'ai');
+      return;
+    }
+    const ok = await _buildRadioPool();
+    if (!ok) {
+      toast(t('radio_empty_toast'), 'warn', 3000);
+      return;
+    }
+    S.radioMode = true;
+    _setRadioUI(true);
+    toast(t('radio_on_toast'), 'ok', 2000);
+    log(`${t('radio_on_toast')} (${S._radioPool.length} tracks)`, 'ai');
+    // Start immediately if nothing is playing
+    if (audio.paused || audio.ended) _radioNext();
+  }
+
+  $('bar-shuffle').addEventListener('click', toggleRadio);
+  $('btn-shuffle-lib')?.addEventListener('click', async () => {
+    // From library: always enable and start fresh
+    if (S.radioMode) {
+      await toggleRadio(); // toggle off
+    } else {
+      // Navigate to studio so the player is visible, then enable
+      $$('.sidebar-item').forEach(b => b.classList.remove('active'));
+      $$('.page').forEach(p => p.classList.remove('active'));
+      document.querySelector('[data-view="studio"]')?.classList.add('active');
+      $('page-studio')?.classList.add('active');
+      await toggleRadio();
+    }
+  });
+
+  /* ══ GENERATION PRESETS ══════════════════════════════════════ */
+
+  let _presetsCache = [];
+
+  async function loadPresets() {
+    try {
+      const res = await apiFetch('/presets');
+      if (!res.ok) return;
+      _presetsCache = await res.json();
+      const sel = $('preset-select');
+      const current = sel.value;
+      sel.innerHTML = '<option value="">Load preset…</option>';
+      _presetsCache.forEach(p => {
+        const opt = document.createElement('option');
+        opt.value = p.id;
+        opt.textContent = p.name;
+        sel.appendChild(opt);
+      });
+      if (current && _presetsCache.find(p => String(p.id) === current)) {
+        sel.value = current;
+      }
+    } catch { }
+  }
+
+  function applyPreset(preset) {
+    // Style tags
+    $$('.tag').forEach(t => t.classList.remove('on'));
+    (preset.style_tags || []).forEach(tag => {
+      const el = document.querySelector(`.tag[data-style="${tag}"]`);
+      if (el) el.classList.add('on');
+    });
+    // Vocal gender
+    $$('.vocal-btn').forEach(b => b.classList.remove('active'));
+    const vBtn = document.querySelector(`.vocal-btn[data-vocal="${preset.vocal_gender || 'auto'}"]`);
+    if (vBtn) { vBtn.classList.add('active'); S.vocalGender = preset.vocal_gender || 'auto'; }
+    // Duration
+    if (preset.auto_duration) {
+      $('auto-duration').checked = true;
+      $('duration').disabled = true;
+      $('auto-dur-label').classList.add('active');
+    } else {
+      $('auto-duration').checked = false;
+      $('duration').disabled = false;
+      $('auto-dur-label').classList.remove('active');
+      $('duration').value = preset.duration ?? 60;
+      $('dur-val').textContent = `${preset.duration ?? 60}s`;
+    }
+    // Guidance & steps
+    $('guidance').value = preset.guidance_scale ?? 7.5;
+    $('guid-val').textContent = preset.guidance_scale ?? 7.5;
+    $('steps').value = preset.infer_steps ?? 30;
+    $('steps-val').textContent = preset.infer_steps ?? 30;
+    // BPM / Key
+    $('bpm').value = preset.bpm ?? '';
+    $('key').value = preset.key ?? '';
+    // Lyrics language
+    const lang = preset.lang || 'en';
+    $$('.lang-btn').forEach(b => b.classList.remove('active'));
+    const lBtn = document.querySelector(`.lang-btn[data-lang="${lang}"]`);
+    if (lBtn) { lBtn.classList.add('active'); S.lang = lang; }
+    log(`Preset "${preset.name}" loaded`, 'ai');
+    toast(`Preset "${preset.name}" loaded`, 'ok', 2000);
+  }
+
+  $('preset-select').addEventListener('change', () => {
+    const id = $('preset-select').value;
+    const delBtn = $('btn-preset-delete');
+    if (!id) { delBtn.classList.add('hidden'); return; }
+    delBtn.classList.remove('hidden');
+    const preset = _presetsCache.find(p => String(p.id) === id);
+    if (preset) applyPreset(preset);
+  });
+
+  $('btn-preset-save').addEventListener('click', () => {
+    $('preset-name-row').classList.remove('hidden');
+    $('preset-name').focus();
+  });
+
+  $('btn-preset-cancel').addEventListener('click', () => {
+    $('preset-name-row').classList.add('hidden');
+    $('preset-name').value = '';
+  });
+
+  $('preset-name').addEventListener('keydown', e => {
+    if (e.key === 'Enter') $('btn-preset-confirm').click();
+    if (e.key === 'Escape') $('btn-preset-cancel').click();
+  });
+
+  $('btn-preset-confirm').addEventListener('click', async () => {
+    const name = $('preset-name').value.trim();
+    if (!name) { $('preset-name').focus(); return; }
+
+    const payload = {
+      name,
+      style_tags: [...$$('.tag.on')].map(t => t.dataset.style),
+      vocal_gender: S.vocalGender,
+      duration: parseFloat($('duration').value),
+      auto_duration: $('auto-duration').checked,
+      guidance_scale: parseFloat($('guidance').value),
+      infer_steps: parseInt($('steps').value),
+      bpm: $('bpm').value ? parseInt($('bpm').value) : null,
+      key: $('key').value.trim() || null,
+      lang: S.lang,
+    };
+
+    try {
+      const res = await apiFetch('/presets', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || res.statusText);
+      $('preset-name-row').classList.add('hidden');
+      $('preset-name').value = '';
+      await loadPresets();
+      // Select the newly created preset
+      if (data.id) $('preset-select').value = data.id;
+      $('btn-preset-delete').classList.remove('hidden');
+      toast(`Preset "${name}" saved`, 'ok', 2000);
+      log(`Preset "${name}" saved`, 'ai');
+    } catch (err) {
+      toast(`Save failed: ${err.message}`, 'error', 3000);
+    }
+  });
+
+  $('btn-preset-delete').addEventListener('click', async () => {
+    const id = $('preset-select').value;
+    if (!id) return;
+    const preset = _presetsCache.find(p => String(p.id) === id);
+    const name = preset?.name || 'this preset';
+    if (!confirm(`Delete preset "${name}"?`)) return;
+    try {
+      const res = await apiFetch(`/presets/${id}`, { method: 'DELETE' });
+      if (!res.ok) throw new Error((await res.json()).detail || res.statusText);
+      toast(`Preset "${name}" deleted`, 'warn', 2000);
+      await loadPresets();
+      $('btn-preset-delete').classList.add('hidden');
+    } catch (err) {
+      toast(`Delete failed: ${err.message}`, 'error', 3000);
+    }
+  });
+
+  // ── Login form ──────────────────────────────────────────────
+  $('login-form').addEventListener('submit', async e => {
+    e.preventDefault();
+    const username = $('login-username').value.trim();
+    const password = $('login-password').value;
+    $('login-idle').classList.add('hidden');
+    $('login-busy').classList.remove('hidden');
+    $('login-error').classList.add('hidden');
+    try {
+      const r = await fetch('/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username, password }),
+      });
+      const data = await r.json();
+      if (!r.ok) throw new Error(data.detail || 'Login failed');
+      S.token = data.token;
+      localStorage.setItem('maz_token', data.token);
+      _applyUser({ id: data.user_id, username: data.username, role: data.role });
+      _hideLogin();
+      connectWS();
+      loadPresets();
+      checkHealth();
+      checkAI();
+    } catch (err) {
+      $('login-error').textContent = err.message;
+      $('login-error').classList.remove('hidden');
+    } finally {
+      $('login-idle').classList.remove('hidden');
+      $('login-busy').classList.add('hidden');
+    }
+  });
+
+  // ── Logout ──────────────────────────────────────────────────
+  $('btn-logout').addEventListener('click', () => _logout());
+
+  // ── Mobile: swipe navigation ─────────────────────────────────
+  (function initSwipe() {
+    const PAGES = ['studio', 'library', 'voice', 'train', 'evaluate'];
+    let _tx = 0, _ty = 0;
+    $('main') && $('main').addEventListener('touchstart', e => {
+      _tx = e.touches[0].clientX; _ty = e.touches[0].clientY;
+    }, { passive: true });
+    $('main') && $('main').addEventListener('touchend', e => {
+      const dx = e.changedTouches[0].clientX - _tx;
+      const dy = e.changedTouches[0].clientY - _ty;
+      if (Math.abs(dx) < 50 || Math.abs(dy) > Math.abs(dx) * 0.7) return;
+      const activeBtn = document.querySelector('.sidebar-item.active');
+      if (!activeBtn) return;
+      const cur = PAGES.indexOf(activeBtn.dataset.view);
+      const next = dx < 0 ? Math.min(cur + 1, PAGES.length - 1) : Math.max(cur - 1, 0);
+      if (next !== cur) {
+        document.querySelector(`.sidebar-item[data-view="${PAGES[next]}"]`)?.click();
+      }
+    }, { passive: true });
+  })();
+
+  // ── Mobile: pull-to-refresh on library ───────────────────────
+  (function initPullRefresh() {
+    let _startY = 0, _pulling = false;
+    const main = $('main') || document.querySelector('.main');
+    if (!main) return;
+    main.addEventListener('touchstart', e => {
+      if (main.scrollTop === 0) { _startY = e.touches[0].clientY; _pulling = true; }
+    }, { passive: true });
+    main.addEventListener('touchend', e => {
+      if (!_pulling) return;
+      const dy = e.changedTouches[0].clientY - _startY;
+      _pulling = false;
+      const libPage = $('page-library');
+      if (dy > 60 && libPage?.classList.contains('active')) {
+        renderLib(); loadStats();
+        toast('Library refreshed', 'success', 1500);
+      }
+    }, { passive: true });
+  })();
+
+  // ── Mobile: collapsible studio sections ──────────────────────
+  (function initCollapsible() {
+    const isMobile = () => window.innerWidth <= 768;
+    $$('[data-collapsible]').forEach(section => {
+      const header = section.querySelector('[data-collapse-trigger]');
+      const body   = section.querySelector('[data-collapse-body]');
+      if (!header || !body) return;
+      header.addEventListener('click', () => {
+        if (!isMobile()) return;
+        const open = !body.classList.contains('collapse-hidden');
+        body.classList.toggle('collapse-hidden', open);
+        header.classList.toggle('collapse-closed', open);
+      });
+    });
+  })();
 
 }); // end DOMContentLoaded

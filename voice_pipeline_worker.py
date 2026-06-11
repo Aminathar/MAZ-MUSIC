@@ -6,15 +6,15 @@ Usage:
 Pipeline:
     1. Stem separation — BSRoformer (fallback: htdemucs_ft) splits song into
        vocals + instrumental track.
-    2. HPF (80 Hz) — remove sub-bass rumble before Seed-VC.
-    3. Seed-VC voice conversion — 30 steps, cfg-rate 0.7 for natural prosody/emotion.
+    2. HPF (40 Hz) — remove sub-bass rumble while preserving chest warmth/resonance.
+    3. Seed-VC voice conversion — SEEDVC_STEPS steps (default 30), cfg-rate SEEDVC_CFG_RATE (default 0.7).
     4. Voice restoration chain (all scipy, no heavy neural models):
-         a. Parametric EQ — 80 Hz low-cut, −1.5 dB boxiness at 350 Hz,
+         a. Parametric EQ — 40 Hz low-cut, −1.5 dB boxiness at 350 Hz,
             −1.5 dB gentle metallic notch at 1.5 kHz, +2 dB presence at 3 kHz,
             +2 dB air at 10 kHz
          b. Frequency-selective de-esser (6–9 kHz, 3:1, −20 dB threshold)
-         c. Subtle room reverb (4% wet) — just enough to seat the voice in the mix
-    5. RMS-loudness-matched mix — vocals sit 4 dB over BGM by RMS, not peak.
+         c. Subtle room reverb (6% wet) — just enough to seat the voice in the mix
+    5. RMS-loudness-matched mix — vocals sit 6 dB over BGM by RMS, not peak.
 
 Exits 0 and prints "OK: <output_path>" on success.
 Exits 1 and prints error to stderr on failure.
@@ -38,10 +38,32 @@ voice_reference = Path(sys.argv[2]).resolve()
 output_path     = Path(sys.argv[3]).resolve()
 
 SEED_VC_DIR     = Path(__file__).parent.parent / "seed-vc"
-DIFFUSION_STEPS = int(os.environ.get("SEEDVC_STEPS", "50"))
-FP16            = os.environ.get("SEEDVC_FP16", "True")
-F0_CONDITION    = os.environ.get("SEEDVC_F0", "True")
-VOICE_TYPE      = os.environ.get("VOICE_TYPE", "svc").lower()
+DIFFUSION_STEPS = int(os.environ.get("SEEDVC_STEPS",    "30"))
+FP16            = os.environ.get("SEEDVC_FP16",         "True")
+F0_CONDITION    = os.environ.get("SEEDVC_F0",           "True")
+# cfg-rate: how closely to follow reference voice character (0=prosody-free, 1=full imitation)
+SEEDVC_CFG_RATE = os.environ.get("SEEDVC_CFG_RATE",     "0.7")
+VOICE_TYPE      = os.environ.get("VOICE_TYPE",          "svc").lower()
+
+# ─── Stem cache ──────────────────────────────────────────────────────────────
+import hashlib as _hashlib
+
+_STEMS_CACHE = Path(__file__).parent / "stems_cache"
+_STEMS_CACHE.mkdir(exist_ok=True)
+
+def _cache_key(p: Path) -> str:
+    s = p.stat()
+    return _hashlib.md5(f"{p}:{s.st_size}:{s.st_mtime}".encode()).hexdigest()
+
+def _cached_stems(audio: Path):
+    k = _cache_key(audio)
+    v, i = _STEMS_CACHE / f"{k}_v.wav", _STEMS_CACHE / f"{k}_i.wav"
+    return (v, i) if v.exists() and i.exists() else (None, None)
+
+def _save_stems(audio: Path, voc: Path, ins: Path) -> None:
+    k = _cache_key(audio)
+    shutil.copy(str(voc), str(_STEMS_CACHE / f"{k}_v.wav"))
+    shutil.copy(str(ins), str(_STEMS_CACHE / f"{k}_i.wav"))
 
 # ─── Validate ────────────────────────────────────────────────────────────────
 if not generated_audio.exists():
@@ -82,9 +104,17 @@ if VOICE_TYPE == "rvc":
         no_vocals_path_r = rvc_tmp / "no_vocals.wav"
         sep_dir_r        = rvc_tmp / "sep"
         sep_dir_r.mkdir()
-        separated = False
 
-        # ── Stem separation (BSRoformer → Demucs fallback) ───────────────────
+        # ── Stem separation (cache → BSRoformer → Demucs fallback) ──────────
+        _cv, _ci = _cached_stems(generated_audio)
+        if _cv:
+            shutil.copy(str(_cv), str(vocals_path_r))
+            shutil.copy(str(_ci), str(no_vocals_path_r))
+            separated = True
+            print("  Using cached stems", flush=True)
+        else:
+            separated = False
+
         try:
             from audio_separator.separator import Separator
             print("[RVC 1/3] Separating stems with BSRoformer…", flush=True)
@@ -121,12 +151,15 @@ if VOICE_TYPE == "rvc":
                 sources = apply_model(model, wav_tensor, device=_demucs_device, progress=True)[0]
             vocals_idx = model.sources.index("vocals")
             no_vocals_np = sum(
-                sources[i].numpy()
+                sources[i].cpu().numpy()
                 for i, s in enumerate(model.sources) if s != "vocals"
             )
-            sf.write(str(vocals_path_r), sources[vocals_idx].numpy().T, model_sr)
+            sf.write(str(vocals_path_r), sources[vocals_idx].cpu().numpy().T, model_sr)
             sf.write(str(no_vocals_path_r), no_vocals_np.T, model_sr)
             print("  htdemucs_ft done", flush=True)
+
+        if not _cv:
+            _save_stems(generated_audio, vocals_path_r, no_vocals_path_r)
 
         # ── HPF ──────────────────────────────────────────────────────────────
         try:
@@ -136,7 +169,7 @@ if VOICE_TYPE == "rvc":
                 voc_np = np.stack([voc_np, voc_np])
             else:
                 voc_np = voc_np.T
-            sos = butter(4, 80.0 / (voc_sr / 2), btype="high", output="sos")
+            sos = butter(4, 40.0 / (voc_sr / 2), btype="high", output="sos")
             voc_np = np.stack([sosfilt(sos, ch).astype(np.float32) for ch in voc_np])
             sf.write(str(vocals_path_r), voc_np.T, voc_sr)
         except Exception as e:
@@ -177,10 +210,10 @@ if VOICE_TYPE == "rvc":
             bgm = bgm * (0.65 / bgm_peak)
         rms_bgm = float(np.sqrt(np.mean(bgm ** 2)) + 1e-9)
         rms_v   = float(np.sqrt(np.mean(vocals ** 2)) + 1e-9)
-        vocals  = vocals * (rms_bgm * (10 ** (4.0 / 20)) / rms_v)
+        vocals  = vocals * (rms_bgm * (10 ** (6.0 / 20)) / rms_v)
         v_peak  = float(np.max(np.abs(vocals)))
-        if v_peak > 0.88:
-            vocals = vocals * (0.88 / v_peak)
+        if v_peak > 0.92:
+            vocals = vocals * (0.92 / v_peak)
 
         mixed = bgm + vocals
         peak  = float(np.max(np.abs(mixed)))
@@ -214,7 +247,15 @@ try:
     sep_dir        = tmp_dir / "sep"
     sep_dir.mkdir()
 
-    separated = False
+    # ── Stem cache check ─────────────────────────────────────────────────────
+    _svc_cv, _svc_ci = _cached_stems(generated_audio)
+    if _svc_cv:
+        shutil.copy(str(_svc_cv), str(vocals_path))
+        shutil.copy(str(_svc_ci), str(no_vocals_path))
+        separated = True
+        print("  Using cached stems", flush=True)
+    else:
+        separated = False
 
     # ── Try audio-separator (BSRoformer — best quality) ──────────────────────
     try:
@@ -273,16 +314,19 @@ try:
             sources = apply_model(model, wav_tensor, device=_demucs_device, progress=True)[0]
 
         vocals_idx   = model.sources.index("vocals")
-        vocals_np    = sources[vocals_idx].numpy()
+        vocals_np    = sources[vocals_idx].cpu().numpy()
         no_vocals_np = sum(
-            sources[i].numpy()
+            sources[i].cpu().numpy()
             for i, s in enumerate(model.sources) if s != "vocals"
         )
         sf.write(str(vocals_path),    vocals_np.T,    model_sr)
         sf.write(str(no_vocals_path), no_vocals_np.T, model_sr)
         print(f"  htdemucs_ft separation complete", flush=True)
 
-    # ── High-pass filter: remove sub-80 Hz rumble before Seed-VC ─────────────
+    if not _svc_cv:
+        _save_stems(generated_audio, vocals_path, no_vocals_path)
+
+    # ── High-pass filter: remove sub-40 Hz rumble before Seed-VC ─────────────
     # Pre-denoise removed: BSRoformer separation already yields clean vocals,
     # and Seed-VC's diffusion process handles residual noise internally.
     try:
@@ -292,11 +336,11 @@ try:
             vocals_np = np.stack([vocals_np, vocals_np])
         else:
             vocals_np = vocals_np.T
-        sos = butter(4, 80.0 / (voc_sr / 2), btype='high', output='sos')
+        sos = butter(4, 40.0 / (voc_sr / 2), btype='high', output='sos')
         hpf_channels = [sosfilt(sos, ch).astype(np.float32) for ch in vocals_np]
         vocals_np = np.stack(hpf_channels)
         sf.write(str(vocals_path), vocals_np.T, voc_sr)
-        print("  HPF (80 Hz) applied", flush=True)
+        print("  HPF (40 Hz) applied", flush=True)
     except Exception as e:
         print(f"  HPF skipped: {e}", flush=True)
 
@@ -321,7 +365,7 @@ try:
         "--output",             str(vc_out_dir),
         "--diffusion-steps",    str(DIFFUSION_STEPS),
         "--length-adjust",      "1.0",
-        "--inference-cfg-rate", "0.7",
+        "--inference-cfg-rate", SEEDVC_CFG_RATE,
         "--fp16",               FP16,
         "--f0-condition",       F0_CONDITION,
     ]
@@ -399,7 +443,7 @@ try:
     # 3000 Hz +2.0 dB shelf — restore presence and consonant clarity
     # 10kHz  +2.0 dB shelf — restore air and breathiness (emotion lives here too)
     try:
-        wav_np = _bq(wav_np, *_hp(80))
+        wav_np = _bq(wav_np, *_hp(40))
         wav_np = _bq(wav_np, *_peak(350,  -1.5, 1.5))
         wav_np = _bq(wav_np, *_peak(1500, -1.5, 1.5))
         wav_np = _bq(wav_np, *_hshelf(3000, 2.0))
@@ -446,13 +490,13 @@ try:
         ir       = rng.standard_normal(ir_len).astype(np.float32) * np.exp(-t / 0.055)
         ir      /= np.max(np.abs(ir)) + 1e-9
         ir_pad   = np.concatenate([np.zeros(PRE_DLY, dtype=np.float32), ir])
-        WET      = 0.04
+        WET      = 0.06
         rev_chs  = []
         for ch in wav_np:
             wet = fftconvolve(ch, ir_pad)[:len(ch)].astype(np.float32)
             rev_chs.append(ch * (1.0 - WET) + wet * WET)
         wav_np = np.stack(rev_chs)
-        print(f"  room reverb applied (7% wet)", flush=True)
+        print(f"  room reverb applied (6% wet)", flush=True)
     except Exception as e:
         print(f"  reverb skipped: {e}", flush=True)
 
@@ -503,13 +547,13 @@ try:
         bgm = bgm * (0.65 / bgm_peak)
         rms_bgm = float(np.sqrt(np.mean(bgm ** 2)) + 1e-9)
 
-    TARGET_OVER_DB = 4.0   # dB vocals over BGM
+    TARGET_OVER_DB = 6.0   # dB vocals over BGM
     target_rms_v   = rms_bgm * (10 ** (TARGET_OVER_DB / 20))
     vocals         = vocals * (target_rms_v / rms_vocals)
 
     v_peak = float(np.max(np.abs(vocals)))
-    if v_peak > 0.88:
-        vocals = vocals * (0.88 / v_peak)
+    if v_peak > 0.92:
+        vocals = vocals * (0.92 / v_peak)
 
     mixed = bgm + vocals
     peak  = float(np.max(np.abs(mixed)))

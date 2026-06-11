@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import os
+import signal
 import sys
 from pathlib import Path
 from typing import Iterable, List, Set
@@ -54,7 +55,7 @@ def _kill_pid_tree(pid: int, timeout: float = 4.0) -> int:
     """Kill a process and all its descendants. Returns count terminated."""
     if not HAS_PSUTIL:
         try:
-            os.kill(pid, 9)
+            os.kill(pid, signal.SIGTERM)
             return 1
         except Exception:
             return 0

@@ -32,10 +32,11 @@ from datetime import datetime, date
 from typing import Optional, Dict, List
 from collections import defaultdict
 
-from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect, UploadFile, File, Form
+from fastapi import FastAPI, HTTPException, Header, Request, WebSocket, WebSocketDisconnect, UploadFile, File, Form, Depends
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, HTMLResponse
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 
@@ -43,13 +44,16 @@ from dotenv import load_dotenv
 load_dotenv(Path(__file__).parent / ".env")
 
 import process_guard
+import auth as _auth
 
 # ─── Config ───────────────────────────────────────────────────
 ACESTEP_API    = os.environ.get("ACESTEP_API", "http://localhost:8001")
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "admin1234")
 MAX_PER_DAY    = int(os.environ.get("MAX_PER_DAY", "10"))
-POLL_INTERVAL  = 3.0   # seconds between ACE-Step status polls
-POLL_TIMEOUT   = 600   # hard wall-clock deadline in seconds
+POLL_INTERVAL          = 3.0   # seconds between ACE-Step status polls
+POLL_TIMEOUT           = 600   # hard wall-clock deadline in seconds
+VOICE_PIPELINE_TIMEOUT = int(os.environ.get("VOICE_PIPELINE_TIMEOUT", "1800"))  # 30 min
+VOICE_TRAIN_TIMEOUT    = int(os.environ.get("VOICE_TRAIN_TIMEOUT",    "7200"))  # 2 hours
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")   # free key from aistudio.google.com
 GEMINI_MODEL   = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
 STATIC_DIR     = Path(__file__).parent / "static"
@@ -107,6 +111,56 @@ analysis_cache: Dict[str, dict] = {}
 voice_training_jobs:  Dict[str, dict] = {}
 voice_training_procs: Dict[str, object] = {}
 
+_CACHE_MAX = 500  # max entries for unbounded in-memory caches
+_audio_scan_sizes: Dict[str, int] = {}  # path → last-seen size for fs-scan stability check
+
+def _cache_set(d: dict, key: str, value) -> None:
+    """Insert key→value into d, evicting the oldest entry when over _CACHE_MAX."""
+    d[key] = value
+    if len(d) > _CACHE_MAX:
+        del d[next(iter(d))]
+
+def _datetime_default(obj):
+    if isinstance(obj, datetime):
+        return obj.isoformat()
+    raise TypeError(f"Not serializable: {type(obj)}")
+
+def _persist_queue() -> None:
+    """Atomically rewrite pending_queue table to match current generation_queue."""
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.execute("DELETE FROM pending_queue")
+            for i, job in enumerate(generation_queue):
+                conn.execute(
+                    "INSERT INTO pending_queue (job_id, data, position) VALUES (?,?,?)",
+                    (job["job_id"], json.dumps(job, default=_datetime_default), i),
+                )
+            conn.commit()
+    except Exception as e:
+        log.warning(f"Queue persist failed: {e}")
+
+def _load_queue_from_db() -> None:
+    """Restore generation_queue from pending_queue table on startup."""
+    global generation_queue
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            rows = conn.execute(
+                "SELECT data FROM pending_queue ORDER BY position"
+            ).fetchall()
+        jobs = []
+        for (data,) in rows:
+            job = json.loads(data)
+            if isinstance(job.get("queued_at"), str):
+                job["queued_at"] = datetime.fromisoformat(job["queued_at"])
+            job["started_at"] = None
+            job["status"] = "queued"
+            jobs.append(job)
+        generation_queue = jobs
+        if jobs:
+            log.info(f"Restored {len(jobs)} pending job(s) from queue")
+    except Exception as e:
+        log.warning(f"Queue restore failed: {e}")
+
 # ─── SQLite Database ───────────────────────────────────────────
 def init_db():
     """Create tables if they don't exist."""
@@ -141,11 +195,38 @@ def init_db():
                 analyzed_at TEXT DEFAULT (datetime('now'))
             )
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS presets (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                name        TEXT NOT NULL,
+                params      TEXT NOT NULL,
+                created_at  TEXT DEFAULT (datetime('now'))
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                username      TEXT UNIQUE NOT NULL,
+                password_hash TEXT NOT NULL,
+                role          TEXT NOT NULL DEFAULT 'user',
+                is_active     INTEGER NOT NULL DEFAULT 1,
+                created_at    TEXT DEFAULT (datetime('now'))
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS pending_queue (
+                job_id   TEXT PRIMARY KEY,
+                data     TEXT NOT NULL,
+                position INTEGER NOT NULL DEFAULT 0
+            )
+        """)
         # Migrations — safe to run on existing DBs
         for _col_sql in [
             "ALTER TABLE tracks ADD COLUMN title TEXT",
             "ALTER TABLE tracks ADD COLUMN voice_sections_path TEXT",
             "ALTER TABLE tracks ADD COLUMN favorited INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE tracks ADD COLUMN user_id INTEGER REFERENCES users(id)",
+            "ALTER TABLE presets ADD COLUMN user_id INTEGER REFERENCES users(id)",
         ]:
             try:
                 conn.execute(_col_sql)
@@ -153,6 +234,19 @@ def init_db():
                 pass  # column already exists
         conn.commit()
     log.info(f"Database initialized: {DB_PATH}")
+
+
+def _ensure_admin_user():
+    """Create the default admin account if no users exist yet."""
+    with sqlite3.connect(DB_PATH) as conn:
+        count = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+        if count == 0:
+            conn.execute(
+                "INSERT INTO users (username, password_hash, role) VALUES (?,?,?)",
+                ("admin", _auth.hash_password(ADMIN_PASSWORD), "admin"),
+            )
+            conn.commit()
+            log.info("Created default admin account (username: admin, password: ADMIN_PASSWORD env var)")
 
 def save_track_to_db(job: dict, audio_path: str):
     """Save a completed track to the database, copying audio to permanent storage."""
@@ -170,13 +264,16 @@ def save_track_to_db(job: dict, audio_path: str):
                     log.warning(f"Could not copy audio to permanent store: {e}")
             if dest.exists():
                 audio_path = str(dest)
+                # Keep audio_file_map pointing at the permanent copy so
+                # /audio/{job_id} immediately serves the stable file.
+                _cache_set(audio_file_map, job_id, dest)
     try:
         with sqlite3.connect(DB_PATH) as conn:
             conn.execute("""
                 INSERT OR IGNORE INTO tracks
                 (job_id, prompt, lyrics, duration, steps, guidance, seed,
-                 bpm_input, key_input, audio_path, ip)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?)
+                 bpm_input, key_input, audio_path, ip, user_id)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
             """, (
                 job_id,
                 job["prompt"],
@@ -189,6 +286,7 @@ def save_track_to_db(job: dict, audio_path: str):
                 job.get("key"),
                 audio_path,
                 job.get("ip"),
+                job.get("user_id"),
             ))
             conn.commit()
         log.info(f"Track saved to DB: {job_id}")
@@ -240,7 +338,54 @@ def strip_section_headers(lyrics: str) -> str:
     cleaned = re.sub(r'\n{3,}', '\n\n', cleaned)
     return cleaned.strip()
 
+# ─── Auth dependency ──────────────────────────────────────────
+_bearer = HTTPBearer(auto_error=False)
+
+def _require_admin_password(x_admin_password: Optional[str] = Header(None)) -> None:
+    """FastAPI dependency — raises 401 unless X-Admin-Password header matches ADMIN_PASSWORD."""
+    if x_admin_password != ADMIN_PASSWORD:
+        raise HTTPException(status_code=401, detail="Invalid admin password")
+
+def get_current_user(
+    creds: Optional[HTTPAuthorizationCredentials] = Depends(_bearer),
+) -> dict:
+    """FastAPI dependency — resolves JWT to user dict or raises 401."""
+    token = creds.credentials if creds else None
+    if not token:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    payload = _auth.decode_token(token)
+    if not payload:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    with sqlite3.connect(DB_PATH) as conn:
+        row = conn.execute(
+            "SELECT id, username, role, is_active FROM users WHERE id=?",
+            (int(payload["sub"]),),
+        ).fetchone()
+    if not row or not row[3]:
+        raise HTTPException(status_code=401, detail="User not found or inactive")
+    return {"id": row[0], "username": row[1], "role": row[2]}
+
+def require_admin(user: dict = Depends(get_current_user)) -> dict:
+    """FastAPI dependency — raises 403 unless user is admin."""
+    if user["role"] != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+    return user
+
 # ─── Schemas ──────────────────────────────────────────────────
+class LoginRequest(BaseModel):
+    username: str = Field(..., min_length=1, max_length=80)
+    password: str = Field(..., min_length=1)
+
+class CreateUserRequest(BaseModel):
+    username: str = Field(..., min_length=2, max_length=80)
+    password: str = Field(..., min_length=6)
+    role:     str = Field("user")
+
+class UpdateUserRequest(BaseModel):
+    password:  Optional[str] = None
+    role:      Optional[str] = None
+    is_active: Optional[bool] = None
+
 class GenerateRequest(BaseModel):
     prompt:         str           = Field(..., min_length=1, max_length=2000)
     lyrics:         Optional[str] = Field(None, max_length=8000)
@@ -258,6 +403,19 @@ class QueueResponse(BaseModel):
     job_id:    str
     position:  int
     estimated_wait_minutes: float
+
+class PresetSave(BaseModel):
+    """Payload for saving a generation preset."""
+    name:          str   = Field(..., min_length=1, max_length=80)
+    style_tags:    List[str] = Field(default_factory=list)
+    vocal_gender:  str   = Field("auto")
+    duration:      float = Field(60.0)
+    auto_duration: bool  = Field(False)
+    guidance_scale: float = Field(7.5)
+    infer_steps:   int   = Field(30)
+    bpm:           Optional[int] = Field(None)
+    key:           Optional[str] = Field(None)
+    lang:          Optional[str] = Field("en")
 
 # ─── Helpers ──────────────────────────────────────────────────
 _VOCAL_GENDER_TAGS = {
@@ -294,9 +452,10 @@ def queue_state() -> dict:
     return {
         "queue_length": len(generation_queue),
         "active_job": {
-            "job_id":  active_job["job_id"]  if active_job else None,
-            "prompt":  active_job["prompt"]  if active_job else None,
-            "elapsed": int((datetime.now() - active_job["started_at"]).total_seconds()) if active_job else 0,
+            "job_id":   active_job["job_id"]  if active_job else None,
+            "prompt":   active_job["prompt"]  if active_job else None,
+            "elapsed":  int((datetime.now() - active_job["started_at"]).total_seconds()) if active_job else 0,
+            "progress": active_job.get("_progress", 0.0) if active_job else 0.0,
         },
         "total_generated": total_generated,
         "total_failed":    total_failed,
@@ -315,9 +474,9 @@ def _sanitize_json(obj):
 async def broadcast(data: dict):
     payload = json.dumps(_sanitize_json(data))
     dead = []
-    for ws in ws_clients:
+    for ws in list(ws_clients):
         try:
-            await ws.send_text(payload)
+            await asyncio.wait_for(ws.send_text(payload), timeout=5.0)
         except Exception:
             dead.append(ws)
     for ws in dead:
@@ -382,26 +541,20 @@ def find_newest_audio_after(since_timestamp: float) -> Optional[Path]:
             log.warning(f"Audio dir scan error: {e}")
 
     if best_file:
-        # Non-blocking stability check: compare sizes across two poll cycles instead of sleeping.
-        # We record the size here and only return the file if it matches on the next call.
-        # For simplicity, require size > 50 KB as a minimum sanity floor.
-        try:
-            if best_file.stat().st_size < 50_000:
-                return None  # still writing very small chunks
-        except Exception:
-            pass
-        log.info(f"Newest audio (fs scan): {best_file.name}")
+        log.info(f"Newest audio candidate (fs scan): {best_file.name}")
     return best_file
 
 
 class _APIConnectionError(Exception):
     """Raised when ACE-Step API cannot be reached (network error, refused connection)."""
 
-async def _query_acestep_result(task_id: str) -> Optional[Path]:
-    """Poll ACE-Step /query_result and return the audio Path when done, else None.
-    Returns None while still running.
-    Raises RuntimeError if ACE-Step reports generation failure.
-    Raises _APIConnectionError if the API cannot be reached at all."""
+async def _query_acestep_result(task_id: str) -> tuple:
+    """Poll ACE-Step /query_result. Returns (audio_path_or_None, progress_dict).
+
+    progress_dict keys: progress (0.0-1.0), stage (str), progress_text (str).
+    Raises RuntimeError on generation failure, _APIConnectionError on network error.
+    """
+    prog: dict = {"progress": 0.0, "stage": "", "progress_text": ""}
     try:
         async with httpx.AsyncClient(timeout=10) as client:
             r = await client.post(
@@ -409,32 +562,38 @@ async def _query_acestep_result(task_id: str) -> Optional[Path]:
                 json={"task_id_list": [task_id]},
             )
         if r.status_code != 200:
-            return None
+            return None, prog
         data = r.json().get("data", [])
         if not data:
-            return None
+            return None, prog
         item = data[0]
         status = item.get("status", 0)
+        prog["progress_text"] = item.get("progress_text", "") or ""
+        result_raw = item.get("result", "[]")
+        result_list = json.loads(result_raw) if isinstance(result_raw, str) else result_raw
+        if isinstance(result_list, list) and result_list:
+            first = result_list[0]
+            prog["progress"] = float(first.get("progress", 0.0))
+            prog["stage"]    = str(first.get("stage", "") or "")
         if status == 0:
-            return None  # still running
+            return None, prog  # still running
         if status == 2:
             raise RuntimeError("ACE-Step reported generation failure")
         # status == 1 → succeeded; parse audio path from result
-        result_raw = item.get("result", "[]")
-        result_list = json.loads(result_raw) if isinstance(result_raw, str) else result_raw
         if isinstance(result_list, list) and result_list:
             file_path = result_list[0].get("file", "")
             if file_path:
                 p = Path(file_path)
                 if p.exists() and p.stat().st_size > 10_000:
-                    return p
+                    prog["progress"] = 1.0
+                    return p, prog
     except (RuntimeError, _APIConnectionError):
         raise
     except (httpx.ConnectError, httpx.ConnectTimeout, httpx.RemoteProtocolError) as e:
         raise _APIConnectionError(str(e))
     except Exception as e:
         log.debug(f"query_result poll error: {e}")
-    return None
+    return None, prog
 
 # ─── Background queue worker ──────────────────────────────────
 class _JobCancelled(Exception):
@@ -455,15 +614,15 @@ async def queue_worker():
             job = generation_queue.pop(0)
         except IndexError:
             continue  # queue was cleared between the check and the pop
+        _persist_queue()
         active_job = job
         active_job["started_at"] = datetime.now()
         active_job["status"]     = "generating"
 
-        await broadcast({"type": "queue_update", **queue_state()})
-        await broadcast({"type": "job_started", "job_id": job["job_id"]})
-        log.info(f"Processing job {job['job_id']} — {job['prompt'][:60]}...")
-
         try:
+            await broadcast({"type": "queue_update", **queue_state()})
+            await broadcast({"type": "job_started", "job_id": job["job_id"]})
+            log.info(f"Processing job {job['job_id']} — {job['prompt'][:60]}...")
             # Scale timeout with requested duration: 15 s of wall-clock per second of audio,
             # minimum 600 s, hard cap at 3600 s (1 h) for very long pieces.
             requested_dur = job.get("duration", -1) or -1
@@ -509,7 +668,7 @@ async def queue_worker():
             log.info(f"Task submitted — server_task_id={server_task_id}")
 
             submit_time = datetime.now().timestamp()
-            poll_start  = asyncio.get_event_loop().time()
+            poll_start  = asyncio.get_running_loop().time()
             audio_url   = None
             seed_out    = job["seed"]
             consecutive_api_failures = 0
@@ -525,37 +684,62 @@ async def queue_worker():
                     raise _JobCancelled()
 
                 # Use real wall-clock elapsed so httpx timeouts don't inflate the counter.
-                elapsed_secs = asyncio.get_event_loop().time() - poll_start + 6
+                elapsed_secs = asyncio.get_running_loop().time() - poll_start + 6
                 if elapsed_secs >= job_poll_timeout:
                     break
 
                 await asyncio.sleep(POLL_INTERVAL)
-                elapsed_secs = asyncio.get_event_loop().time() - poll_start + 6
+                elapsed_secs = asyncio.get_running_loop().time() - poll_start + 6
 
-                await broadcast({
-                    "type":    "job_progress",
-                    "job_id":  job["job_id"],
-                    "elapsed": int(elapsed_secs),
-                    "status":  "generating",
-                })
-
-                # Primary: ask ACE-Step API for the result (gives exact path, no race conditions)
+                # Primary: ask ACE-Step API for result + real progress
                 try:
-                    audio_file = await _query_acestep_result(server_task_id)
+                    audio_file, prog = await _query_acestep_result(server_task_id)
                     consecutive_api_failures = 0  # successful API contact
+                    active_job["_progress"] = prog.get("progress", 0.0)
                 except RuntimeError as e:
                     raise Exception(str(e))
                 except _APIConnectionError:
                     consecutive_api_failures += 1
-                    audio_file = None
+                    audio_file, prog = None, {}
+
+                await broadcast({
+                    "type":          "job_progress",
+                    "job_id":        job["job_id"],
+                    "elapsed":       int(elapsed_secs),
+                    "status":        "generating",
+                    "progress":      prog.get("progress", 0.0),
+                    "stage":         prog.get("stage", ""),
+                    "progress_text": prog.get("progress_text", ""),
+                })
 
                 # Fallback: filesystem scan (handles edge-cases where task_id mapping differs)
                 if not audio_file:
                     audio_file = find_newest_audio_after(submit_time)
 
+                # Stability gate — applies to BOTH primary API path and filesystem fallback.
+                # A 3-min WAV is ~30MB; it exceeds any simple size threshold long before it's
+                # fully written.  We only accept the file once its size has stopped changing
+                # across two consecutive poll cycles (i.e. at least POLL_INTERVAL seconds at
+                # the same size), which confirms ACE-Step has finished flushing to disk.
                 if audio_file:
-                    audio_file_map[server_task_id] = audio_file
-                    audio_url = f"/audio/{server_task_id}"
+                    try:
+                        current_sz = audio_file.stat().st_size
+                    except OSError:
+                        current_sz = 0
+                    _key = str(audio_file)
+                    prev_sz = _audio_scan_sizes.get(_key)
+                    _audio_scan_sizes[_key] = current_sz
+                    if current_sz < 50_000 or prev_sz is None or prev_sz != current_sz:
+                        log.info(
+                            f"Audio found but still writing "
+                            f"(prev={prev_sz} cur={current_sz}) — waiting…"
+                        )
+                        audio_file = None  # not stable yet, continue polling
+
+                if audio_file:
+                    _cache_set(audio_file_map, server_task_id, audio_file)
+                    _cache_set(audio_file_map, job["job_id"],  audio_file)
+                    audio_url = f"/audio/{job['job_id']}"
                     log.info(f"Audio ready after {elapsed_secs:.0f}s — {audio_file}")
                     break
 
@@ -611,13 +795,14 @@ async def queue_worker():
                         process_guard.register(vproc)
                         try:
                             _, vstderr = await asyncio.wait_for(
-                                vproc.communicate(), timeout=1800
+                                vproc.communicate(), timeout=VOICE_PIPELINE_TIMEOUT
                             )
                         finally:
                             process_guard.unregister(vproc)
                         if vproc.returncode == 0 and final_out.exists():
-                            audio_file_map[server_task_id] = final_out
-                            audio_url = f"/audio/{server_task_id}"
+                            _cache_set(audio_file_map, server_task_id, final_out)
+                            _cache_set(audio_file_map, job["job_id"],  final_out)
+                            audio_url = f"/audio/{job['job_id']}"
                             log.info(f"[voice] {vtype.upper()} done → {final_out.name}")
                         else:
                             err = vstderr.decode(errors="replace")[-400:]
@@ -680,6 +865,8 @@ async def _watched_queue_worker():
 @app.on_event("startup")
 async def startup():
     init_db()
+    _ensure_admin_user()
+    _load_queue_from_db()
     _load_voice_index()
     # Reap any worker processes left behind by a previous crash. They would
     # otherwise hold the GPU / DB locks and silently block new generations.
@@ -691,6 +878,15 @@ async def startup():
     asyncio.create_task(_watched_queue_worker())
     asyncio.create_task(_auto_pull_ollama_model())
     log.info(f"MAZ started — audio dir: {ACESTEP_AUDIO_DIR}")
+    try:
+        import socket as _sock
+        _s = _sock.socket(_sock.AF_INET, _sock.SOCK_DGRAM)
+        _s.connect(("8.8.8.8", 80))
+        _lan = _s.getsockname()[0]
+        _s.close()
+        log.info(f"Mobile access (same Wi-Fi): http://{_lan}:3000")
+    except Exception:
+        pass
 
 
 @app.on_event("shutdown")
@@ -712,19 +908,7 @@ async def root():
     return HTMLResponse(html)
 
 @app.get("/admin")
-async def admin_page(password: str = ""):
-    if password != ADMIN_PASSWORD:
-        return HTMLResponse("""
-        <html><body style='font-family:monospace;padding:40px;background:#0a0a0a;color:#fff'>
-        <h2>Admin Access</h2>
-        <form>
-          <input name='password' type='password' placeholder='Password'
-            style='padding:10px;font-size:14px;background:#1a1a1a;border:1px solid #333;color:#fff;border-radius:6px'/>
-          <button type='submit'
-            style='padding:10px 20px;background:#fff;color:#000;border:none;border-radius:6px;margin-left:8px;cursor:pointer'>
-            Enter
-          </button>
-        </form></body></html>""", status_code=401)
+async def admin_page(_: None = Depends(_require_admin_password)):
     html = (STATIC_DIR / "admin.html").read_text()
     return HTMLResponse(html)
 
@@ -745,6 +929,110 @@ async def health():
         "queue_length":     len(generation_queue),
         "active":           active_job is not None,
     }
+
+# ─── Auth endpoints ───────────────────────────────────────────
+@app.post("/auth/login")
+async def auth_login(req: LoginRequest):
+    """Return a JWT token for valid credentials."""
+    with sqlite3.connect(DB_PATH) as conn:
+        row = conn.execute(
+            "SELECT id, password_hash, role, is_active FROM users WHERE username=?",
+            (req.username,),
+        ).fetchone()
+    if not row or not row[3]:
+        raise HTTPException(status_code=401, detail="Invalid username or password")
+    if not _auth.verify_password(req.password, row[1]):
+        raise HTTPException(status_code=401, detail="Invalid username or password")
+    token = _auth.create_token(row[0], row[2])
+    return {"token": token, "username": req.username, "role": row[2], "user_id": row[0]}
+
+@app.get("/auth/me")
+async def auth_me(user: dict = Depends(get_current_user)):
+    """Return the currently authenticated user's profile."""
+    return user
+
+@app.get("/auth/users")
+async def auth_list_users(admin: dict = Depends(require_admin)):
+    """List all users (admin only)."""
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT id, username, role, is_active, created_at FROM users ORDER BY id"
+        ).fetchall()
+        # Attach per-user track counts
+        counts = {
+            r[0]: r[1]
+            for r in conn.execute("SELECT user_id, COUNT(*) FROM tracks GROUP BY user_id").fetchall()
+        }
+    users = [dict(r) for r in rows]
+    for u in users:
+        u["track_count"] = counts.get(u["id"], 0)
+    return users
+
+@app.post("/auth/users", status_code=201)
+async def auth_create_user(req: CreateUserRequest, admin: dict = Depends(require_admin)):
+    """Create a new user account (admin only)."""
+    if req.role not in ("admin", "user"):
+        raise HTTPException(status_code=400, detail="role must be 'admin' or 'user'")
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.execute(
+                "INSERT INTO users (username, password_hash, role) VALUES (?,?,?)",
+                (req.username, _auth.hash_password(req.password), req.role),
+            )
+            conn.commit()
+    except sqlite3.IntegrityError:
+        raise HTTPException(status_code=409, detail="Username already taken")
+    return {"created": req.username}
+
+@app.patch("/auth/users/{user_id}")
+async def auth_update_user(
+    user_id: int, req: UpdateUserRequest, admin: dict = Depends(require_admin)
+):
+    """Update password, role, or active status for a user (admin only)."""
+    with sqlite3.connect(DB_PATH) as conn:
+        row = conn.execute("SELECT id FROM users WHERE id=?", (user_id,)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="User not found")
+        if req.password is not None:
+            conn.execute(
+                "UPDATE users SET password_hash=? WHERE id=?",
+                (_auth.hash_password(req.password), user_id),
+            )
+        if req.role is not None:
+            conn.execute("UPDATE users SET role=? WHERE id=?", (req.role, user_id))
+        if req.is_active is not None:
+            conn.execute(
+                "UPDATE users SET is_active=? WHERE id=?", (int(req.is_active), user_id)
+            )
+        conn.commit()
+    return {"updated": user_id}
+
+@app.delete("/auth/users/{user_id}")
+async def auth_delete_user(user_id: int, admin: dict = Depends(require_admin)):
+    """Delete a user account (admin only). Cannot delete own account."""
+    if user_id == admin["id"]:
+        raise HTTPException(status_code=400, detail="Cannot delete your own account")
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute("DELETE FROM users WHERE id=?", (user_id,))
+        conn.commit()
+    return {"deleted": user_id}
+
+@app.post("/auth/change-password")
+async def auth_change_password(
+    req: UpdateUserRequest, user: dict = Depends(get_current_user)
+):
+    """Allow any logged-in user to change their own password."""
+    if not req.password or len(req.password) < 6:
+        raise HTTPException(status_code=400, detail="Password must be at least 6 characters")
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            "UPDATE users SET password_hash=? WHERE id=?",
+            (_auth.hash_password(req.password), user["id"]),
+        )
+        conn.commit()
+    return {"changed": True}
+
 
 @app.get("/ai/status")
 async def ai_status():
@@ -780,16 +1068,23 @@ async def ai_status():
 async def usage(request: Request):
     ip   = get_client_ip(request)
     used = daily_usage[get_usage_key(ip)]
-    return {"remaining": 999, "limit": 999, "used": used}
+    return {"remaining": get_remaining(ip), "limit": MAX_PER_DAY, "used": used}
 
 @app.post("/generate", response_model=QueueResponse)
-async def generate(req: GenerateRequest, request: Request):
+async def generate(
+    req: GenerateRequest,
+    request: Request,
+    user: dict = Depends(get_current_user),
+):
     ip = get_client_ip(request)
+    if get_remaining(ip) <= 0:
+        raise HTTPException(status_code=429, detail=f"Daily limit of {MAX_PER_DAY} generations reached. Try again tomorrow.")
     daily_usage[get_usage_key(ip)] += 1
 
     job = {
         "job_id":         str(uuid.uuid4()),
         "ip":             ip,
+        "user_id":        user["id"],
         "prompt":         _apply_vocal_gender(req.prompt, req.vocal_gender),
         "lyrics":         req.lyrics,
         "duration":       req.duration,
@@ -808,12 +1103,18 @@ async def generate(req: GenerateRequest, request: Request):
     }
 
     generation_queue.append(job)
+    _persist_queue()
     position = len(generation_queue)
 
     active_elapsed   = int((datetime.now() - active_job["started_at"]).total_seconds()) if active_job else 0
     active_remaining = max(0, (active_job["duration"] * 0.5) - active_elapsed) if active_job else 0
-    wait_seconds     = active_remaining + ((position - 1) * req.duration * 0.5)
-    wait_minutes     = round(wait_seconds / 60, 1)
+    # Sum durations of all jobs ahead of this one in the queue (exclude the job we just appended)
+    queued_ahead_seconds = sum(
+        (j.get("duration") or 60.0) * 0.5
+        for j in generation_queue[:-1]
+    )
+    wait_seconds  = active_remaining + queued_ahead_seconds
+    wait_minutes  = round(wait_seconds / 60, 1)
 
     await broadcast({"type": "queue_update", **queue_state()})
     log.info(f"Job {job['job_id']} queued position={position} ip={ip}")
@@ -843,6 +1144,7 @@ async def cancel_job(job_id: str):
     before = len(generation_queue)
     generation_queue = [j for j in generation_queue if j["job_id"] != job_id]
     if len(generation_queue) < before:
+        _persist_queue()
         await broadcast({"type": "queue_update", **queue_state()})
         log.info(f"Job {job_id} removed from queue by user")
         return {"cancelled": job_id}
@@ -859,7 +1161,7 @@ async def get_audio(task_id: str, request: Request):
     if not audio_file:
         audio_file = find_audio_file(task_id)
         if audio_file:
-            audio_file_map[task_id] = audio_file
+            _cache_set(audio_file_map, task_id, audio_file)
     if not audio_file:
         # Library playback: task_id is the job_id — look up the stored audio path in the DB.
         # (audio_file_map is keyed by server_task_id which differs from job_id, so the
@@ -886,7 +1188,7 @@ async def get_audio(task_id: str, request: Request):
                     p = Path(col)
                     if p.exists() and p.stat().st_size > 1000:
                         audio_file = p
-                        audio_file_map[task_id] = audio_file
+                        _cache_set(audio_file_map, task_id, audio_file)
         except Exception as e:
             log.debug(f"DB audio lookup error: {e}")
     if not audio_file or not Path(audio_file).exists():
@@ -969,7 +1271,7 @@ def _resolve_audio(task_id: str) -> Optional[Path]:
 
     found = find_audio_file(task_id)
     if found:
-        audio_file_map[task_id] = found
+        _cache_set(audio_file_map, task_id, found)
         return Path(found)
 
     try:
@@ -983,7 +1285,7 @@ def _resolve_audio(task_id: str) -> Optional[Path]:
                 if col:
                     p = Path(col)
                     if p.exists() and p.stat().st_size > 1000:
-                        audio_file_map[task_id] = p
+                        _cache_set(audio_file_map, task_id, p)
                         return p
     except Exception:
         pass
@@ -1016,7 +1318,7 @@ def _convert_audio(src: Path, fmt: str) -> bytes:
             subprocess.run(
                 [ffmpeg, "-y", "-i", str(src), "-codec:a", "libmp3lame",
                  "-qscale:a", "2", str(out_path)],
-                capture_output=True, check=True,
+                capture_output=True, check=True, timeout=120,
             )
         return out_path.read_bytes()
     finally:
@@ -1039,7 +1341,7 @@ async def download_track_fmt(task_id: str, format: str = "wav"):
         media_type = "audio/wav"
     else:
         try:
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
                 data = await loop.run_in_executor(pool, _convert_audio, src, fmt)
         except Exception as e:
@@ -1104,7 +1406,7 @@ async def master_track(task_id: str):
     if not src:
         raise HTTPException(status_code=404, detail="Audio file not found")
     try:
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
             data = await loop.run_in_executor(pool, _master_audio, src)
     except Exception as e:
@@ -1137,9 +1439,7 @@ async def websocket_endpoint(websocket: WebSocket):
 
 # ─── Admin API ────────────────────────────────────────────────
 @app.get("/admin/stats")
-async def admin_stats(password: str = ""):
-    if password != ADMIN_PASSWORD:
-        raise HTTPException(status_code=401, detail="Invalid password")
+async def admin_stats(_: None = Depends(_require_admin_password)):
     return {
         "queue": [
             {
@@ -1166,10 +1466,8 @@ async def admin_stats(password: str = ""):
     }
 
 @app.delete("/admin/active")
-async def admin_clear_active(password: str = ""):
+async def admin_clear_active(_: None = Depends(_require_admin_password)):
     """Force-clear a stuck active job so the queue can proceed."""
-    if password != ADMIN_PASSWORD:
-        raise HTTPException(status_code=401, detail="Invalid password")
     global active_job
     if active_job is None:
         return {"cleared": None, "message": "No active job"}
@@ -1180,40 +1478,37 @@ async def admin_clear_active(password: str = ""):
     return {"cleared": cleared_id}
 
 @app.delete("/admin/queue/{job_id}")
-async def admin_cancel(job_id: str, password: str = ""):
-    if password != ADMIN_PASSWORD:
-        raise HTTPException(status_code=401, detail="Invalid password")
+async def admin_cancel(job_id: str, _: None = Depends(_require_admin_password)):
     global generation_queue
     before = len(generation_queue)
     generation_queue = [j for j in generation_queue if j["job_id"] != job_id]
     if len(generation_queue) < before:
+        _persist_queue()
         await broadcast({"type": "queue_update", **queue_state()})
         return {"cancelled": job_id}
     raise HTTPException(status_code=404, detail="Job not in queue")
 
 @app.delete("/admin/queue")
-async def admin_clear_queue(password: str = ""):
-    if password != ADMIN_PASSWORD:
-        raise HTTPException(status_code=401, detail="Invalid password")
+async def admin_clear_queue(_: None = Depends(_require_admin_password)):
     global generation_queue
     generation_queue = []
+    _persist_queue()
     await broadcast({"type": "queue_update", **queue_state()})
     return {"cleared": True}
 
 
 @app.post("/admin/panic")
-async def admin_panic(password: str = ""):
+async def admin_panic(_: None = Depends(_require_admin_password)):
     """Nuclear option: kill every tracked child + any orphan workers, drop the
     active job, and clear the queue. Use when generation is wedged and a server
     restart hasn't helped (typically: prior crash left worker processes holding
     the GPU or DB locks)."""
-    if password != ADMIN_PASSWORD:
-        raise HTTPException(status_code=401, detail="Invalid password")
     global active_job, generation_queue
     cleared_active = active_job["job_id"] if active_job else None
     queued_count = len(generation_queue)
     active_job = None
     generation_queue = []
+    _persist_queue()
     children = process_guard.kill_all()
     orphans = process_guard.kill_orphans()
     await broadcast({"type": "queue_update", **queue_state()})
@@ -1229,12 +1524,76 @@ async def admin_panic(password: str = ""):
     }
 
 # ─── AI endpoints ─────────────────────────────────────────────
-from pydantic import BaseModel as BM
-
-class AIRequest(BM):
+class AIRequest(BaseModel):
     prompt: str
     language: Optional[str] = None   # ISO-639-1 hint: "kk", "ru", "en", etc.
     mode: Optional[str] = "lyrics"   # "lyrics" or "enhance"
+
+# ─── Kazakh language helpers ──────────────────────────────────
+# Kazakh has 9 letters absent from Russian: ә ғ қ ң ө ү ұ і (+ uppercase variants).
+# Scoring their frequency vs all Cyrillic reliably separates Kazakh from Russian output.
+_KK_SPECIFIC = frozenset("әғқңөүұіӘҒҚҢӨҮҰІ")
+_CYRILLIC_RE = re.compile(r"[а-яёА-ЯЁәғқңөүұіӘҒҚҢӨҮҰІ]")
+
+def _kazakh_score(text: str) -> float:
+    """Fraction of Cyrillic characters that are Kazakh-specific (not shared with Russian).
+
+    Score < 0.03 means fewer than 3% Kazakh-specific letters → likely Russian output.
+    Returns 1.0 for very short texts (can't judge reliably).
+    """
+    cyrillic = _CYRILLIC_RE.findall(text)
+    if len(cyrillic) < 30:
+        return 1.0
+    return sum(1 for c in cyrillic if c in _KK_SPECIFIC) / len(cyrillic)
+
+
+_KK_SYSTEM_PROMPT = (
+    "Сен — қазақ тілінде жазатын кәсіби ақын және әнші.\n"
+    "Барлық мәтінді тек таза қазақ тілінде жаз. Орысша, ағылшынша немесе аралас тілде жазуға қатаң тыйым салынады.\n\n"
+    "Қазақ тілінің грамматикалық ережелері:\n"
+    "• Қазақша арнайы дыбыстар: ә, ғ, қ, ң, ө, ү, ұ, і — міндетті түрде дұрыс қолдан\n"
+    "• Септік жалғаулары: -ның/-нің, -ға/-ге/-қа/-ке, -да/-де/-та/-те, -дан/-ден/-тан/-тен\n"
+    "• Етістік жұрнақтары: -ады/-еді, -ған/-ген, -мақ/-мек, -ып/-іп\n"
+    "• Ұйқас: ABAB немесе AABB — жол соңдары ұйқасуы керек; ырғақ табиғи болуы керек\n\n"
+    "Қатаң тыйым:\n"
+    "• Орысша сөздер (любовь, сердце, небо, душа, мечта және т.б.) — жазуға болмайды\n"
+    "• Транслитерация (qazan, zhuldyz, zhürek) — жазуға болмайды\n"
+    "• Орысша грамматика (-ого, -его, -ать, -ить жалғаулары) — жазуға болмайды\n\n"
+    "Шығармашылық бостандық: тақырыпқа сай өз сөздеріңді таңда — бекітілген сөз тізімі жоқ.\n"
+    "Тек ән мәтінін жаз — ешқандай түсіндірме, аударма немесе комментарий болмасын."
+)
+
+_KK_EXAMPLE_VERSE = (
+    "Мысал (осы үлгіде жаз):\n"
+    "[Verse 1]\n"
+    "Далада жел соғады,\n"
+    "Жүрегім сенді сағынады,\n"
+    "Ай нұры жолды жарытады,\n"
+    "Жан сезімім шарпып тұрады.\n\n"
+)
+
+
+def _build_kazakh_lyrics_prompt(user_prompt: str, include_example: bool = False) -> str:
+    """Build the generation request fully in Kazakh.
+
+    Writing the user message in Kazakh is the single biggest quality lever:
+    LLMs match the language of the user turn, not just the system prompt.
+    """
+    example = _KK_EXAMPLE_VERSE if include_example else ""
+    return (
+        f"{example}"
+        f"Мына тақырыпта толық ән мәтіні жаз: {user_prompt}\n\n"
+        "Міндетті құрылым — әр бөлімді толық, ұйқасты жолдармен жаз:\n"
+        "[Verse 1] — 6-8 жол\n"
+        "[Chorus] — 4-6 жол\n"
+        "[Verse 2] — 6-8 жол\n"
+        "[Chorus] — 4-6 жол\n"
+        "[Bridge] — 4-6 жол\n"
+        "[Chorus] — 4-6 жол\n"
+        "[Outro] — 2-4 жол\n\n"
+        "Тек таза қазақша ән мәтіні жаз. Орысша немесе ағылшынша сөз жазба."
+    )
+
 
 # ─── Ollama auto-pull ─────────────────────────────────────────
 # Default preference list (English-first workloads).
@@ -1395,47 +1754,89 @@ async def _auto_pull_ollama_model():
 
 
 # ─── Gemini API (free tier) for high-quality Kazakh lyrics ────
-async def _call_gemini(prompt: str, system_prompt: str) -> Optional[str]:
-    """Call Gemini REST API. Returns generated text or None on failure."""
+_gemini_last_error: str = ""  # exposed to callers for richer error messages
+
+# Tried in order on failure; all free-tier models with separate capacity pools.
+_GEMINI_FALLBACK_MODELS = [
+    "gemini-2.5-flash",
+    "gemini-2.0-flash",
+    "gemini-2.0-flash-lite",
+    "gemini-flash-latest",
+]
+
+
+async def _call_gemini(prompt: str, system_prompt: str, temperature: float = 0.7) -> Optional[str]:
+    """Call Gemini REST API with automatic model fallback.
+
+    Tries _GEMINI_FALLBACK_MODELS in order. On 503/429 ('high demand' / rate limit)
+    retries once after a short delay before moving to the next model.
+    Returns generated text or None if all models fail.
+    Sets _gemini_last_error with the human-readable reason on failure.
+    """
+    global _gemini_last_error
+    _gemini_last_error = ""
     if not GEMINI_API_KEY:
+        _gemini_last_error = "GEMINI_API_KEY is not set"
         return None
-    url = (
-        f"https://generativelanguage.googleapis.com/v1beta/models/"
-        f"{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
-    )
+
+    # Build model list: configured model first, then the rest of the fallbacks
+    models_to_try = [GEMINI_MODEL] + [m for m in _GEMINI_FALLBACK_MODELS if m != GEMINI_MODEL]
+
     body = {
         "system_instruction": {"parts": [{"text": system_prompt}]},
-        "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {
-            "temperature": 0.9,
-            "maxOutputTokens": 4096,
-        },
+        "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+        "generationConfig": {"temperature": temperature, "maxOutputTokens": 8192},
     }
-    try:
-        async with httpx.AsyncClient(timeout=60) as client:
-            r = await client.post(url, json=body)
-        if r.status_code == 200:
-            data = r.json()
-            text = (
-                data.get("candidates", [{}])[0]
-                .get("content", {})
-                .get("parts", [{}])[0]
-                .get("text", "")
-                .strip()
-            )
-            if text:
-                log.info(f"Gemini response ({GEMINI_MODEL}): {len(text)} chars")
-                return text
-            log.warning("Gemini returned empty text")
-        else:
-            detail = ""
+
+    for model in models_to_try:
+        url = (
+            f"https://generativelanguage.googleapis.com/v1beta/models/"
+            f"{model}:generateContent?key={GEMINI_API_KEY}"
+        )
+        for attempt in range(2):  # 1 retry per model on transient errors
             try:
-                detail = r.json().get("error", {}).get("message", "")[:120]
-            except Exception:
-                pass
-            log.warning(f"Gemini HTTP {r.status_code}: {detail}")
-    except Exception as e:
-        log.warning(f"Gemini call failed: {type(e).__name__}: {e}")
+                async with httpx.AsyncClient(timeout=60) as client:
+                    r = await client.post(url, json=body)
+
+                if r.status_code == 200:
+                    data = r.json()
+                    parts = data.get("candidates", [{}])[0].get("content", {}).get("parts", [])
+                    text = "\n".join(
+                        p.get("text", "") for p in parts if not p.get("thought", False)
+                    ).strip()
+                    if text:
+                        log.info(f"Gemini response ({model}): {len(text)} chars")
+                        return text
+                    _gemini_last_error = f"{model}: empty response"
+                    log.warning(_gemini_last_error)
+                    break  # empty response — move to next model
+
+                # 503 / 429: transient — retry once after a short wait
+                if r.status_code in (429, 503) and attempt == 0:
+                    try:
+                        msg = r.json().get("error", {}).get("message", "")[:120]
+                    except Exception:
+                        msg = f"HTTP {r.status_code}"
+                    log.warning(f"Gemini {model} transient error ({r.status_code}): {msg} — retrying in 3s")
+                    await asyncio.sleep(3)
+                    continue
+
+                try:
+                    _gemini_last_error = r.json().get("error", {}).get("message", "")[:200]
+                except Exception:
+                    _gemini_last_error = f"HTTP {r.status_code}"
+                log.warning(f"Gemini {model} HTTP {r.status_code}: {_gemini_last_error}")
+                break  # non-retryable error — move to next model
+
+            except Exception as e:
+                _gemini_last_error = f"{type(e).__name__}: {e}"
+                log.warning(f"Gemini {model} exception: {_gemini_last_error}")
+                break
+
+        else:
+            # Both attempts exhausted on retryable error — move to next model
+            log.warning(f"Gemini {model} still failing after retry — trying next model")
+
     return None
 
 
@@ -1488,9 +1889,9 @@ async def ai_generate(req: AIRequest):
                     r = await client.post("http://localhost:11434/api/generate", json={
                         "model": model, "prompt": final_prompt,
                         "system": system_prompt, "stream": False, "think": False,
+                        "keep_alive": 0,
                     })
                 if r.status_code == 200:
-                    import re
                     result = re.sub(r'<think>.*?</think>', '', r.json().get("response", ""), flags=re.DOTALL).strip()
                     return {"result": result, "source": f"ollama/{model}"}
                 last_error = f"Ollama returned {r.status_code}"
@@ -1498,27 +1899,16 @@ async def ai_generate(req: AIRequest):
                 last_error = str(e)
         raise HTTPException(status_code=502, detail=f"All AI models failed. Last error: {last_error}")
 
-    # Always request full structured lyrics regardless of how the prompt was phrased.
-    lyrics_prompt = _build_lyrics_prompt(req.prompt)
+    is_kazakh = lang in ("kk", "kazakh")
+
+    # req.prompt is already the complete, language-specific prompt built by the frontend
+    # (includes theme, rules, rhyme scheme, and structure in the target language).
+    # Do not wrap it — double-wrapping produces contradictory instructions that break output.
+    lyrics_prompt = req.prompt
 
     # Language-specific system prompts.
-    # Kazakh gets a dedicated prompt because generic songwriter prompts produce
-    # transliterated or mixed-language output from most small models.
-    if lang in ("kk", "kazakh"):
-        system_prompt = (
-            "Сен — кәсіби қазақ тілінде жазатын ақын және әнші. "
-            "Сенің міндетің — тек қазақ тілінде, дұрыс грамматикамен, шынайы қазақ сөздерімен толық ән мәтіні жазу. "
-            "Міндетті құрылым: [Verse 1], [Chorus], [Verse 2], [Chorus], [Bridge], [Chorus], [Outro] — әр бөлімді толық жаз. "
-            "Ережелер: "
-            "1. Тек қазақ тілінде жаз — орысша, ағылшынша немесе аралас тілде жазуға тыйым салынады. "
-            "2. Нақты қазақ сөздерін қолдан — транслитерация немесе орысша сөздерді қазақша жазу болмасын. "
-            "3. Ұйқас схемасын сақта (AABB немесе ABAB) — жолдардың соңы ұйқасуы керек. "
-            "4. Қазақ тіліне тән жалғаулар мен сөз тіркестерін қолдан (мысалы: -дай/-дей, -лы/-лі, -ған/-ген). "
-            "5. Ешқандай түсіндірме, аударма немесе комментарий жазба — тек ән мәтіні. "
-            "6. Толық аяқталған мәтін жаз — ешқашан бос орын немесе нұсқаулар қалдырма. "
-            "7. Кем дегенде 3-4 минуттық ән үшін жеткілікті ұзындықта жаз. "
-            "Тек ән мәтінін шығар, басқа ештеңе емес."
-        )
+    if is_kazakh:
+        system_prompt = _KK_SYSTEM_PROMPT
     elif lang in ("ru", "russian"):
         system_prompt = (
             "Ты — профессиональный русскоязычный поэт и автор текстов песен. "
@@ -1560,16 +1950,32 @@ async def ai_generate(req: AIRequest):
             f"Output ONLY the song lyrics with section labels, nothing else."
         )
 
-    # ── Kazakh: try Gemini first (much better quality) ────────
-    if lang in ("kk", "kazakh") and GEMINI_API_KEY:
-        log.info(f"AI generate: trying Gemini ({GEMINI_MODEL}) for Kazakh")
-        result = await _call_gemini(lyrics_prompt, system_prompt)
+    # ── Kazakh: Gemini only — local models don't know Kazakh ──────
+    # Never fall back to Ollama for Kazakh: small models produce meaningless
+    # word-repetition and the user gets unacceptable output with no error signal.
+    if is_kazakh:
+        if not GEMINI_API_KEY:
+            raise HTTPException(
+                status_code=503,
+                detail="Kazakh lyrics require the Gemini API. Set GEMINI_API_KEY in maz/.env (free key at aistudio.google.com).",
+            )
+        log.info(f"AI generate: Gemini ({GEMINI_MODEL}) for Kazakh")
+        result = await _call_gemini(lyrics_prompt, system_prompt, temperature=0.5)
         if result:
+            score = _kazakh_score(result)
+            log.info(f"Gemini Kazakh score={score:.3f} ({len(result)} chars) — returning")
             return {"result": result, "source": f"gemini/{GEMINI_MODEL}"}
-        log.info("Gemini unavailable, falling back to local Ollama")
+        # All Gemini models failed — fall back to local Ollama rather than crashing.
+        # Ollama output quality for Kazakh is poor, but during a demo a degraded result
+        # is far better than a hard error. Log clearly so the cause is obvious.
+        log.warning(f"All Gemini models failed for Kazakh ({_gemini_last_error}) — falling back to Ollama")
 
     # ── Local Ollama (all languages, or Kazakh fallback) ──────
-    models = await _pick_local_models(language=lang)
+    # For Kazakh, only the best available model is tried. Models that lack
+    # Kazakh coverage (llama3.2, mistral, etc.) always fail the score check,
+    # so iterating through all installed models just adds N×2 reload penalties.
+    all_models = await _pick_local_models(language=lang)
+    models = all_models[:1] if is_kazakh else all_models
 
     if not models:
         # Last resort: use Gemini for any language if no local model is available
@@ -1587,40 +1993,52 @@ async def ai_generate(req: AIRequest):
             ),
         )
 
-    # Try each model in preference order; fall back on failure
-    last_error = None
-    for model in models:
-        log.info(f"AI generate: model={model} language='{lang}'")
+    async def _ollama_generate(prompt: str, model: str) -> Optional[str]:
+        """Call Ollama and return stripped text, or None on failure."""
         try:
             async with httpx.AsyncClient(timeout=300) as client:
                 r = await client.post(
                     "http://localhost:11434/api/generate",
                     json={
-                        "model": model,
-                        "prompt": lyrics_prompt,
-                        "system": system_prompt,
-                        "stream": False,
-                        "think": False,
+                        "model":      model,
+                        "prompt":     prompt,
+                        "system":     system_prompt,
+                        "stream":     False,
+                        "think":      False,
+                        "keep_alive": 0,
+                        # Lower temperature for Kazakh reduces language drift
+                        **({"options": {"temperature": 0.7}} if is_kazakh else {}),
                     },
                 )
             if r.status_code == 200:
-                result = r.json().get("response", "").strip()
-
-                import re
-                result = re.sub(r'<think>.*?</think>', '', result, flags=re.DOTALL).strip()
-
-                log.info(f"AI response from model '{model}' ({len(result)} chars)")
-                return {"result": result, "source": f"ollama/{model}"}
-            else:
-                log.warning(f"Model '{model}' returned HTTP {r.status_code}, trying next model...")
-                last_error = f"Ollama returned {r.status_code} for model '{model}'"
-                continue
-        except HTTPException:
-            raise
+                raw = r.json().get("response", "").strip()
+                return re.sub(r'<think>.*?</think>', '', raw, flags=re.DOTALL).strip()
+            log.warning(f"Model '{model}' returned HTTP {r.status_code}")
         except Exception as e:
-            log.warning(f"Model '{model}' failed: {type(e).__name__}: {e}, trying next model...")
-            last_error = f"{type(e).__name__}: {e}"
+            log.warning(f"Model '{model}' failed: {type(e).__name__}: {e}")
+        return None
+
+    # Try each model in preference order; fall back on failure.
+    # Kazakh uses models[:1] (set above) — no retry allowed because keep_alive:0
+    # unloads the model immediately, making a second call require a full reload
+    # which starves ACE-Step of GPU memory.
+    last_error = None
+
+    for model in models:
+        log.info(f"AI generate: model={model} language='{lang}'")
+        result = await _ollama_generate(lyrics_prompt, model)
+        if result is None:
+            last_error = f"Model '{model}' failed or returned empty"
             continue
+
+        if is_kazakh:
+            score = _kazakh_score(result)
+            log.info(f"Kazakh score for model '{model}': {score:.3f} ({len(result)} chars)")
+            if score < 0.03:
+                log.warning(f"Model '{model}' score={score:.3f} — low but returning (no retry to avoid GPU OOM)")
+
+        log.info(f"AI response from model '{model}' ({len(result)} chars)")
+        return {"result": result, "source": f"ollama/{model}"}
 
     # All models failed
     log.error(f"All {len(models)} models failed. Last error: {last_error}")
@@ -1630,13 +2048,13 @@ async def ai_generate(req: AIRequest):
 def _run_analysis(audio_path: Path) -> dict:
     """
     Synchronous librosa analysis — runs in a thread pool.
-    Analyzes first 60s of audio for speed.
+    Analyzes the full audio for accurate cross-variant comparisons.
     """
     import librosa
     import numpy as np
 
     log.info(f"Analyzing: {audio_path.name}")
-    y, sr = librosa.load(str(audio_path), sr=22050, mono=True, duration=60)
+    y, sr = librosa.load(str(audio_path), sr=22050, mono=True)
 
     # BPM
     tempo, _ = librosa.beat.beat_track(y=y, sr=sr)
@@ -1661,9 +2079,11 @@ def _run_analysis(audio_path: Path) -> dict:
             best_corr, best_key, best_mode = corr_min, notes[i], 'minor'
     key = f"{best_key} {best_mode}"
 
-    # Energy (RMS normalized)
-    rms         = librosa.feature.rms(y=y)[0]
-    energy_norm = float(min(1.0, np.mean(rms) * 20))
+    # Energy: 90th-percentile RMS normalised to a typical loud-track reference (~0.08).
+    # More stable than mean×scalar across tracks with different loudness envelopes.
+    rms     = librosa.feature.rms(y=y)[0]
+    rms_p90 = float(np.percentile(rms, 90))
+    energy_norm = float(min(1.0, rms_p90 / 0.08))
 
     # Spectral bands
     stft   = np.abs(librosa.stft(y))
@@ -1673,19 +2093,19 @@ def _run_analysis(audio_path: Path) -> dict:
     treble_e = float(np.mean(stft[(freqs >= 4000) & (freqs < 20000)]))
     total    = bass_e + mid_e + treble_e + 1e-8
 
-    # Mood
+    # Mood — mutually exclusive elif chain; thresholds chosen to avoid border ambiguity.
     valence = 0.65 if best_mode == 'major' else 0.35
-    if energy_norm > 0.7 and bpm > 120:
+    if energy_norm >= 0.65 and bpm >= 120:
         mood = "Energetic"
-    elif energy_norm > 0.7:
+    elif energy_norm >= 0.65 and bpm < 120:
         mood = "Intense"
-    elif energy_norm < 0.3 and bpm < 90:
+    elif energy_norm < 0.35 and bpm < 90:
         mood = "Calm"
-    elif energy_norm < 0.3:
+    elif energy_norm < 0.35 and best_mode == 'minor':
         mood = "Melancholic"
-    elif bpm > 130:
+    elif bpm >= 130 and valence > 0.5:
         mood = "Upbeat"
-    elif valence > 0.6:
+    elif valence >= 0.6:
         mood = "Happy"
     elif valence < 0.4:
         mood = "Dark"
@@ -1717,20 +2137,18 @@ async def analyze_track(task_id: str):
     audio_file = audio_file_map.get(task_id)
     if not audio_file:
         audio_file = find_audio_file(task_id)
-    if not audio_file:
-        audio_file = find_newest_audio_after(0)
     if not audio_file or not Path(audio_file).exists():
         raise HTTPException(status_code=404, detail="Audio file not found")
 
     try:
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
             result = await loop.run_in_executor(pool, _run_analysis, Path(audio_file))
     except Exception as e:
         log.error(f"Analysis failed: {e}")
         raise HTTPException(status_code=500, detail=f"Analysis failed: {e}")
 
-    analysis_cache[task_id] = result
+    _cache_set(analysis_cache, task_id, result)
     # Save analysis to database
     save_analysis_to_db(task_id, result)
     return result
@@ -1790,9 +2208,9 @@ def _run_stems(audio_path: Path) -> bytes:
                 sources = apply_model(model, wav_tensor, device=device, progress=False)[0]
             vocals_idx   = model.sources.index("vocals")
             no_vocals_np = sum(
-                sources[i].numpy() for i, s in enumerate(model.sources) if s != "vocals"
+                sources[i].cpu().numpy() for i, s in enumerate(model.sources) if s != "vocals"
             )
-            sf.write(str(vocals_path),       sources[vocals_idx].numpy().T, model_sr)
+            sf.write(str(vocals_path),       sources[vocals_idx].cpu().numpy().T, model_sr)
             sf.write(str(instrumental_path), no_vocals_np.T,                model_sr)
             separated = True
             log.info("[stems] htdemucs_ft separation complete")
@@ -1818,7 +2236,7 @@ async def get_stems(task_id: str):
         raise HTTPException(status_code=404, detail="Audio file not found")
 
     try:
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
             zip_bytes = await loop.run_in_executor(pool, _run_stems, Path(audio_file))
     except Exception as e:
@@ -1843,14 +2261,25 @@ async def get_history(
     favorites_only: bool = False,
     voice_sections_only: bool = False,
     sort: str = "newest",
+    all_users: bool = False,
+    user: dict = Depends(get_current_user),
 ):
-    """Get all generated tracks with their analysis from the database."""
+    """Get generated tracks. Users see their own; admins may pass all_users=1."""
+    clauses = []
+    params: list = []
+
+    # Scope to current user (include legacy tracks with no owner) unless admin requesting all
+    if not (user["role"] == "admin" and all_users):
+        clauses.append("(t.user_id = ? OR t.user_id IS NULL)")
+        params.append(user["id"])
+
     if favorites_only:
-        where = "WHERE t.favorited = 1"
+        clauses.append("t.favorited = 1")
     elif voice_sections_only:
-        where = "WHERE t.voice_sections_path IS NOT NULL AND t.voice_sections_path != ''"
-    else:
-        where = ""
+        clauses.append("t.voice_sections_path IS NOT NULL AND t.voice_sections_path != ''")
+
+    where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+
     _sort_map = {
         "newest":   "t.created_at DESC",
         "oldest":   "t.created_at ASC",
@@ -1870,21 +2299,25 @@ async def get_history(
             {where}
             ORDER BY {order_by}
             LIMIT ? OFFSET ?
-        """, (limit, offset)).fetchall()
-        total = conn.execute(
-            f"SELECT COUNT(*) FROM tracks t {where}"
-        ).fetchone()[0]
+        """, (*params, limit, offset)).fetchall()
+
+    # Filter out rows whose audio file no longer exists on disk
+    valid_rows = []
+    for r in rows:
+        p = r["audio_path"]
+        if p and Path(p).exists():
+            valid_rows.append(dict(r))
 
     return {
-        "tracks": [dict(r) for r in rows],
-        "total":  total,
+        "tracks": valid_rows,
+        "total":  len(valid_rows),
         "limit":  limit,
         "offset": offset,
     }
 
 
 @app.get("/history/bulk-download")
-async def bulk_download(job_ids: str):
+async def bulk_download(job_ids: str, _: dict = Depends(get_current_user)):
     """Stream a ZIP archive containing the selected tracks' audio files."""
     import io, zipfile as zf_mod
     from fastapi.responses import StreamingResponse as _SR
@@ -1902,7 +2335,8 @@ async def bulk_download(job_ids: str):
                 path = row[1] or row[0]
                 if path and os.path.exists(path):
                     safe = (row[2] or job_id)[:40].replace("/", "_").replace("\\", "_")
-                    zf.write(path, f"{safe}_{job_id[:8]}.mp3")
+                    ext = Path(path).suffix or ".wav"
+                    zf.write(path, f"{safe}_{job_id[:8]}{ext}")
     buf.seek(0)
     return _SR(
         buf,
@@ -1911,21 +2345,23 @@ async def bulk_download(job_ids: str):
     )
 
 @app.patch("/history/{job_id}/favorite")
-async def toggle_favorite(job_id: str):
+async def toggle_favorite(job_id: str, user: dict = Depends(get_current_user)):
     """Toggle the favorited flag on a track."""
     with sqlite3.connect(DB_PATH) as conn:
         row = conn.execute(
-            "SELECT favorited FROM tracks WHERE job_id=?", (job_id,)
+            "SELECT favorited, user_id FROM tracks WHERE job_id=?", (job_id,)
         ).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="Track not found")
+        if user["role"] != "admin" and row[1] is not None and row[1] != user["id"]:
+            raise HTTPException(status_code=403, detail="Not your track")
         new_val = 0 if row[0] else 1
         conn.execute("UPDATE tracks SET favorited=? WHERE job_id=?", (new_val, job_id))
         conn.commit()
     return {"job_id": job_id, "favorited": bool(new_val)}
 
 @app.get("/history/prompts")
-async def get_prompt_history(limit: int = 30):
+async def get_prompt_history(limit: int = 30, _: dict = Depends(get_current_user)):
     """Return the most recent unique prompts and lyrics for the studio history dropdowns."""
     with sqlite3.connect(DB_PATH) as conn:
         # Deduplicate by prompt text, keep most recent occurrence
@@ -1946,7 +2382,7 @@ async def get_prompt_history(limit: int = 30):
 
 
 @app.get("/history/stats")
-async def get_stats():
+async def get_stats(_: dict = Depends(get_current_user)):
     """Aggregate statistics for the diploma results chapter."""
     with sqlite3.connect(DB_PATH) as conn:
         conn.row_factory = sqlite3.Row
@@ -1998,46 +2434,134 @@ async def get_stats():
     }
 
 @app.get("/history/export")
-async def export_history():
-    """Export all track history as CSV for diploma research."""
-    import io, csv
+async def export_history(
+    format: str = "csv",
+    favorites_only: bool = False,
+    job_ids: Optional[str] = None,
+    search: Optional[str] = None,
+    _: dict = Depends(get_current_user),
+):
+    """Export track history as CSV or JSON with optional filtering."""
+    import io, csv as _csv
+    from datetime import date as _date
+    from fastapi.responses import Response
+
+    conditions: list[str] = []
+    params: list = []
+
+    if favorites_only:
+        conditions.append("t.favorited = 1")
+
+    if job_ids:
+        id_list = [j.strip() for j in job_ids.split(",") if j.strip()]
+        if id_list:
+            placeholders = ",".join("?" * len(id_list))
+            conditions.append(f"t.job_id IN ({placeholders})")
+            params.extend(id_list)
+
+    where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+
     with sqlite3.connect(DB_PATH) as conn:
         conn.row_factory = sqlite3.Row
-        rows = conn.execute("""
-            SELECT t.job_id, t.prompt, t.duration, t.steps, t.guidance,
-                   t.seed, t.bpm_input, t.key_input, t.ip, t.created_at,
+        rows = list(conn.execute(f"""
+            SELECT t.job_id, t.title, t.prompt, t.lyrics,
+                   t.duration, t.steps, t.guidance, t.seed,
+                   t.bpm_input, t.key_input, t.favorited,
+                   t.voice_sections_path, t.created_at,
                    a.bpm, a.key, a.mood, a.energy, a.bass, a.mid, a.treble
             FROM tracks t
             LEFT JOIN analysis a ON a.track_id = t.id
+            {where}
             ORDER BY t.created_at DESC
-        """).fetchall()
+        """, params).fetchall())
 
+    # Optional text search (applied after DB fetch to reuse the query)
+    if search:
+        q = search.lower()
+        rows = [r for r in rows if q in (r["prompt"] or "").lower()
+                                or q in (r["title"] or "").lower()]
+
+    today = _date.today().isoformat()
+    n = len(rows)
+
+    if format == "json":
+        records = [
+            {
+                "job_id":               r["job_id"],
+                "title":                r["title"] or "",
+                "prompt":               r["prompt"] or "",
+                "lyrics":               r["lyrics"] or "",
+                "duration_s":           r["duration"],
+                "steps":                r["steps"],
+                "guidance":             r["guidance"],
+                "seed":                 r["seed"],
+                "bpm_input":            r["bpm_input"],
+                "key_input":            r["key_input"] or "",
+                "favorited":            bool(r["favorited"]),
+                "has_voice_conversion": bool(r["voice_sections_path"]),
+                "audio_url":            f"/audio/{r['job_id']}",
+                "created_at":           r["created_at"],
+                "detected_bpm":         round(r["bpm"], 1) if r["bpm"] else None,
+                "detected_key":         r["key"] or None,
+                "mood":                 r["mood"] or None,
+                "energy":               round(r["energy"], 3) if r["energy"] else None,
+                "bass_pct":             round(r["bass"], 1) if r["bass"] else None,
+                "mid_pct":              round(r["mid"], 1) if r["mid"] else None,
+                "treble_pct":           round(r["treble"], 1) if r["treble"] else None,
+            }
+            for r in rows
+        ]
+        body = json.dumps(
+            {"total": n, "exported_at": today, "tracks": records},
+            ensure_ascii=False, indent=2,
+        ).encode("utf-8")
+        return Response(
+            content=body,
+            media_type="application/json",
+            headers={"Content-Disposition": f'attachment; filename="maz_export_{today}.json"'},
+        )
+
+    # ── CSV ──────────────────────────────────────────────────────
     output = io.StringIO()
-    writer = csv.writer(output)
+    writer = _csv.writer(output)
     writer.writerow([
-        "job_id", "prompt", "duration_s", "steps", "guidance", "seed",
-        "bpm_input", "key_input", "ip", "created_at",
+        "job_id", "title", "prompt", "lyrics",
+        "duration_s", "steps", "guidance", "seed",
+        "bpm_input", "key_input", "favorited", "has_voice_conversion",
+        "audio_url", "created_at",
         "detected_bpm", "detected_key", "mood", "energy",
-        "bass_pct", "mid_pct", "treble_pct"
+        "bass_pct", "mid_pct", "treble_pct",
     ])
     for r in rows:
         writer.writerow([
-            r["job_id"], r["prompt"], r["duration"], r["steps"], r["guidance"],
-            r["seed"], r["bpm_input"], r["key_input"], r["ip"], r["created_at"],
+            r["job_id"],
+            r["title"] or "",
+            r["prompt"] or "",
+            (r["lyrics"] or "").replace("\n", " | "),   # flatten newlines for cell readability
+            r["duration"],
+            r["steps"],
+            r["guidance"],
+            r["seed"],
+            r["bpm_input"] or "",
+            r["key_input"] or "",
+            1 if r["favorited"] else 0,
+            1 if r["voice_sections_path"] else 0,
+            f"/audio/{r['job_id']}",
+            r["created_at"],
             round(r["bpm"], 1) if r["bpm"] else "",
-            r["key"] or "", r["mood"] or "",
+            r["key"] or "",
+            r["mood"] or "",
             round(r["energy"], 3) if r["energy"] else "",
             round(r["bass"], 1) if r["bass"] else "",
             round(r["mid"], 1) if r["mid"] else "",
             round(r["treble"], 1) if r["treble"] else "",
         ])
 
-    csv_bytes = output.getvalue().encode("utf-8-sig")  # utf-8-sig for Excel compatibility
-    from fastapi.responses import Response
+    csv_bytes = output.getvalue().encode("utf-8-sig")   # utf-8-sig for Excel compatibility
     return Response(
         content=csv_bytes,
         media_type="text/csv",
-        headers={"Content-Disposition": "attachment; filename=maz_history.csv"}
+        headers={"Content-Disposition": f'attachment; filename="maz_export_{today}.csv"'},
     )
 
 # ─── Voice Profiles ───────────────────────────────────────────
@@ -2202,6 +2726,7 @@ async def voice_register(
     name:       str                  = Form(...),
     type:       str                  = Form("svc"),
     index_file: Optional[UploadFile] = File(None),
+    _: dict = Depends(get_current_user),
 ):
     """Accept an SVC voice recording or an RVC model file and register it as a voice profile.
 
@@ -2245,7 +2770,7 @@ async def voice_register(
 
 
 @app.get("/voice/profiles")
-async def voice_list_profiles():
+async def voice_list_profiles(_: dict = Depends(get_current_user)):
     """List all saved voice profiles (SVC and RVC)."""
     profiles = []
     for vid, vdata in voice_profile_registry.items():
@@ -2262,7 +2787,7 @@ async def voice_list_profiles():
 
 
 @app.delete("/voice/profiles/{voice_id}")
-async def voice_delete_profile(voice_id: str):
+async def voice_delete_profile(voice_id: str, _: dict = Depends(get_current_user)):
     """Delete a voice profile (SVC wav or RVC model files)."""
     profile = voice_profile_registry.get(voice_id, {})
     vtype   = profile.get("type", "svc") if isinstance(profile, dict) else "svc"
@@ -2277,14 +2802,16 @@ async def voice_delete_profile(voice_id: str):
 
 
 @app.delete("/history/{job_id}")
-async def delete_track(job_id: str):
-    """Delete a track from history."""
+async def delete_track(job_id: str, user: dict = Depends(get_current_user)):
+    """Delete a track from history. Users can only delete their own tracks."""
     with sqlite3.connect(DB_PATH) as conn:
         row = conn.execute(
-            "SELECT id FROM tracks WHERE job_id=?", (job_id,)
+            "SELECT id, user_id FROM tracks WHERE job_id=?", (job_id,)
         ).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="Track not found")
+        if user["role"] != "admin" and row[1] is not None and row[1] != user["id"]:
+            raise HTTPException(status_code=403, detail="Not your track")
         conn.execute("DELETE FROM analysis WHERE track_id=?", (row[0],))
         conn.execute("DELETE FROM tracks WHERE job_id=?", (job_id,))
         conn.commit()
@@ -2295,15 +2822,17 @@ class TitleUpdate(BaseModel):
     title: str = Field(..., max_length=200)
 
 @app.patch("/history/{job_id}/title")
-async def rename_track(job_id: str, body: TitleUpdate):
+async def rename_track(job_id: str, body: TitleUpdate, user: dict = Depends(get_current_user)):
     """Update the user-visible title of a track."""
     title = body.title.strip()
     with sqlite3.connect(DB_PATH) as conn:
         row = conn.execute(
-            "SELECT id FROM tracks WHERE job_id=?", (job_id,)
+            "SELECT id, user_id FROM tracks WHERE job_id=?", (job_id,)
         ).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="Track not found")
+        if user["role"] != "admin" and row[1] is not None and row[1] != user["id"]:
+            raise HTTPException(status_code=403, detail="Not your track")
         conn.execute(
             "UPDATE tracks SET title=? WHERE job_id=?",
             (title or None, job_id),  # empty string → NULL (falls back to prompt)
@@ -2329,7 +2858,9 @@ async def _run_sections_pipeline(job_id: str, audio_path: Path,
     await broadcast({"type": "voice_sections_progress", "job_id": job_id,
                      "status": "processing", "msg": "Starting voice sections…"})
     import tempfile as _tempfile
-    payload_path = Path(_tempfile.mktemp(suffix=".json", prefix="maz_vsec_"))
+    _fd, _tmp = _tempfile.mkstemp(suffix=".json", prefix="maz_vsec_")
+    os.close(_fd)
+    payload_path = Path(_tmp)
     proc = None
     try:
         step = audio_dur / max(len(sections_data), 1)
@@ -2353,10 +2884,10 @@ async def _run_sections_pipeline(job_id: str, audio_path: Path,
                 log.info(f"[sections] {line}")
                 await broadcast({"type": "voice_sections_progress", "job_id": job_id,
                                  "status": "processing", "msg": line})
-        await asyncio.wait_for(proc.wait(), timeout=1800)
+        await asyncio.wait_for(proc.wait(), timeout=VOICE_PIPELINE_TIMEOUT)
         stderr_b = await stderr_task
         if proc.returncode == 0 and output_wav.exists():
-            audio_file_map[map_key] = output_wav
+            _cache_set(audio_file_map, map_key, output_wav)
             try:
                 with sqlite3.connect(DB_PATH) as conn:
                     conn.execute("UPDATE tracks SET voice_sections_path=? WHERE job_id=?",
@@ -2386,7 +2917,7 @@ async def _run_sections_pipeline(job_id: str, audio_path: Path,
         payload_path.unlink(missing_ok=True)
 
 @app.post("/voice/sections")
-async def apply_voice_sections(req: VoiceSectionsRequest):
+async def apply_voice_sections(req: VoiceSectionsRequest, _: dict = Depends(get_current_user)):
     """Apply per-section voice conversion (SVC) to a generated track."""
     if not req.sections:
         raise HTTPException(status_code=400, detail="No sections provided")
@@ -2438,8 +2969,9 @@ async def start_voice_training(
     files:       List[UploadFile] = File(...),
     name:        str              = Form("My Trained Voice"),
     epochs:      int              = Form(80),
-    sample_rate: int              = Form(44100),
+    sample_rate: int              = Form(40000),
     batch_size:  int              = Form(16),
+    _: dict = Depends(get_current_user),
 ):
     """Upload audio samples and start an in-app voice training job."""
     job_id      = uuid.uuid4().hex[:12]
@@ -2466,7 +2998,7 @@ async def start_voice_training(
         "voice_id":   None,
         "started_at": datetime.now().isoformat(),
     }
-    voice_training_jobs[job_id] = job
+    _cache_set(voice_training_jobs, job_id, job)
     asyncio.create_task(_run_training(job_id, dataset_dir, out_dir, model_name,
                                       epochs, sample_rate, batch_size))
     log.info(f"[train] Job {job_id} started — '{model_name}' epochs={epochs}")
@@ -2490,10 +3022,18 @@ async def _run_training(job_id: str, dataset_dir: Path, out_dir: Path,
         voice_training_procs[job_id] = proc
         process_guard.register(proc)
 
+        train_start = asyncio.get_running_loop().time()
         while True:
-            line_bytes = await proc.stdout.readline()
+            try:
+                line_bytes = await asyncio.wait_for(proc.stdout.readline(), timeout=300)
+            except asyncio.TimeoutError:
+                proc.kill()
+                raise asyncio.TimeoutError("Training stalled — no output for 5 minutes")
             if not line_bytes:
                 break
+            if asyncio.get_running_loop().time() - train_start > VOICE_TRAIN_TIMEOUT:
+                proc.kill()
+                raise asyncio.TimeoutError(f"Training exceeded {VOICE_TRAIN_TIMEOUT}s limit")
             line = line_bytes.decode("utf-8", errors="replace").strip()
             if not line:
                 continue
@@ -2536,8 +3076,11 @@ async def _run_training(job_id: str, dataset_dir: Path, out_dir: Path,
                 if idx_src.exists():
                     shutil.copy(str(idx_src), str(RVC_MODELS_DIR / f"{voice_id}.index"))
 
+                # Use "rvc" when a .pth model was produced; fall back to "svc" only if
+                # solely a WAV reference was created (no .pth output).
+                trained_type = "rvc" if pth_src.exists() else "svc"
                 display = job["name"]
-                voice_profile_registry[voice_id] = {"name": display, "type": "svc", "trained": True}
+                voice_profile_registry[voice_id] = {"name": display, "type": trained_type, "trained": True}
                 _save_voice_index()
                 job["voice_id"] = voice_id
                 job["status"]   = "completed"
@@ -2580,13 +3123,13 @@ async def _run_training(job_id: str, dataset_dir: Path, out_dir: Path,
 
 
 @app.get("/voice/train")
-async def list_training_jobs():
+async def list_training_jobs(_: dict = Depends(get_current_user)):
     """List all training jobs (current session)."""
     return {"jobs": list(voice_training_jobs.values())}
 
 
 @app.get("/voice/train/{job_id}")
-async def get_training_status(job_id: str):
+async def get_training_status(job_id: str, _: dict = Depends(get_current_user)):
     """Get the current state of a training job."""
     job = voice_training_jobs.get(job_id)
     if not job:
@@ -2595,7 +3138,7 @@ async def get_training_status(job_id: str):
 
 
 @app.delete("/voice/train/{job_id}")
-async def cancel_training(job_id: str):
+async def cancel_training(job_id: str, _: dict = Depends(get_current_user)):
     """Terminate a running training job."""
     job = voice_training_jobs.get(job_id)
     if not job:
@@ -2609,3 +3152,51 @@ async def cancel_training(job_id: str):
     job["status"] = "cancelled"
     log.info(f"[train] {job_id} cancelled by user")
     return {"cancelled": job_id}
+
+
+# ─── Generation Presets ────────────────────────────────────────
+
+@app.get("/presets")
+async def list_presets(user: dict = Depends(get_current_user)):
+    """Return presets for the current user, newest first."""
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT id, name, params, created_at FROM presets WHERE user_id=? ORDER BY id DESC",
+            (user["id"],),
+        ).fetchall()
+    return [
+        {"id": r["id"], "name": r["name"], "created_at": r["created_at"],
+         **json.loads(r["params"])}
+        for r in rows
+    ]
+
+
+@app.post("/presets", status_code=201)
+async def save_preset(req: PresetSave, user: dict = Depends(get_current_user)):
+    """Save the current Studio parameters as a named preset for the current user."""
+    params = req.model_dump(exclude={"name"})
+    with sqlite3.connect(DB_PATH) as conn:
+        cur = conn.execute(
+            "INSERT INTO presets (name, params, user_id) VALUES (?, ?, ?)",
+            (req.name.strip(), json.dumps(params), user["id"]),
+        )
+        preset_id = cur.lastrowid
+        conn.commit()
+    log.info(f"Preset saved: '{req.name}' id={preset_id} user={user['username']}")
+    return {"id": preset_id, "name": req.name, **params}
+
+
+@app.delete("/presets/{preset_id}", status_code=200)
+async def delete_preset(preset_id: int, user: dict = Depends(get_current_user)):
+    """Delete a saved preset. Users can only delete their own presets."""
+    with sqlite3.connect(DB_PATH) as conn:
+        row = conn.execute("SELECT user_id FROM presets WHERE id=?", (preset_id,)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Preset not found")
+        if user["role"] != "admin" and row[0] != user["id"]:
+            raise HTTPException(status_code=403, detail="Not your preset")
+        conn.execute("DELETE FROM presets WHERE id = ?", (preset_id,))
+        conn.commit()
+    log.info(f"Preset deleted: id={preset_id}")
+    return {"deleted": preset_id}

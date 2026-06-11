@@ -53,6 +53,36 @@
     <span class="music-note" style="left:45%;--dur:15s;--delay:15s;font-size:28px;">♬</span>
   </div>
 
+  <!-- ══ LOGIN OVERLAY ════════════════════════════════════════ -->
+  <div class="login-overlay" id="login-overlay">
+    <div class="login-card">
+      <div class="login-logo">
+        <svg viewBox="0 0 32 32" fill="none" width="40" height="40">
+          <path d="M16 2L28 8.5V23.5L16 30L4 23.5V8.5L16 2Z" fill="white" fill-opacity="0.9"/>
+          <path d="M11 13v6M14 11v10M17 13v6M20 11v10" stroke="#121212" stroke-width="2" stroke-linecap="round"/>
+        </svg>
+        <span class="login-logo-text">MAZ</span>
+      </div>
+      <h2 class="login-title" data-i18n="login_title">Sign in</h2>
+      <p class="login-sub" data-i18n="login_sub">Enter your credentials to continue</p>
+      <form id="login-form" autocomplete="on">
+        <div class="login-field">
+          <label class="login-label" data-i18n="login_username">Username</label>
+          <input id="login-username" class="input login-input" type="text" autocomplete="username" required placeholder="username" />
+        </div>
+        <div class="login-field">
+          <label class="login-label" data-i18n="login_password">Password</label>
+          <input id="login-password" class="input login-input" type="password" autocomplete="current-password" required placeholder="••••••••" />
+        </div>
+        <div class="login-error hidden" id="login-error"></div>
+        <button class="btn-generate login-btn" type="submit" id="login-submit">
+          <span id="login-idle" data-i18n="login_btn">Sign in</span>
+          <span id="login-busy" class="hidden"><span class="spin"></span></span>
+        </button>
+      </form>
+    </div>
+  </div>
+
   <!-- ══ SIDEBAR ══════════════════════════════════════════════ -->
   <nav class="sidebar">
     <div class="sidebar-logo">
@@ -165,7 +195,24 @@
         </div>
         <span class="status-text" id="status-text">Connecting…</span>
       </div>
+    </div>
 
+    <div class="sidebar-divider"></div>
+
+    <!-- Logged-in user info -->
+    <div class="sidebar-section sidebar-user-section">
+      <div class="sidebar-user" id="sidebar-user">
+        <div class="sidebar-user-avatar" id="sidebar-user-avatar">?</div>
+        <div class="sidebar-user-info">
+          <span class="sidebar-user-name" id="sidebar-user-name">—</span>
+          <span class="sidebar-user-role" id="sidebar-user-role">—</span>
+        </div>
+        <button class="sidebar-logout-btn" id="btn-logout" title="Sign out">
+          <svg viewBox="0 0 20 20" fill="none" width="15" height="15">
+            <path d="M13 3h4v14h-4M8 14l4-4-4-4M12 10H3" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+        </button>
+      </div>
     </div>
   </nav>
 
@@ -183,6 +230,28 @@
           <div class="page-heading">
             <h1 data-i18n="studio_title">Create</h1>
             <p class="page-sub" data-i18n="studio_sub">Describe your track, add lyrics, hit generate</p>
+          </div>
+
+          <!-- Presets bar -->
+          <div class="presets-bar">
+            <div class="preset-load-side">
+              <svg viewBox="0 0 16 16" fill="none" width="13" height="13" style="flex-shrink:0;opacity:.6"><path d="M3 3h7l3 3v7H3V3z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/><path d="M6 3v3h5M6 10h4" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>
+              <select id="preset-select" class="preset-select">
+                <option value="">Load preset…</option>
+              </select>
+              <button class="btn-preset-delete hidden" id="btn-preset-delete" title="Delete this preset">
+                <svg viewBox="0 0 16 16" fill="none" width="11" height="11"><path d="M3 3l10 10M13 3L3 13" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+              </button>
+            </div>
+            <button class="btn-preset-save" id="btn-preset-save">
+              <svg viewBox="0 0 16 16" fill="none" width="12" height="12"><path d="M2 14V6l4-4h6a1 1 0 011 1v11a1 1 0 01-1 1H3a1 1 0 01-1-1z" stroke="currentColor" stroke-width="1.3"/><path d="M5 14V9h6v5M5 2v4h5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>
+              <span data-i18n="btn_preset_save">Save preset</span>
+            </button>
+          </div>
+          <div class="preset-name-row hidden" id="preset-name-row">
+            <input id="preset-name" class="input" type="text" placeholder="Preset name…" maxlength="80" autocomplete="off" />
+            <button class="btn-go" id="btn-preset-confirm" data-i18n="preset_save_confirm">Save</button>
+            <button class="btn-preset-x" id="btn-preset-cancel">✕</button>
           </div>
 
           <!-- Music description -->
@@ -334,18 +403,27 @@
           <!-- Generate -->
           <div class="generate-block">
 
-            <button class="btn-generate" id="btn-generate">
-              <span id="gen-idle">
-                <svg viewBox="0 0 24 24" fill="none" style="width:20px;height:20px">
-                  <polygon points="5,3 19,12 5,21" fill="currentColor" />
-                </svg>
-                <span data-i18n="btn_generate">Generate Track</span>
-              </span>
-              <span id="gen-busy" class="hidden">
-                <span class="spin"></span>
-                <span id="gen-label">Generating…</span>
-              </span>
-            </button>
+            <div class="gen-btn-row">
+              <button class="btn-generate" id="btn-generate">
+                <span id="gen-idle">
+                  <svg viewBox="0 0 24 24" fill="none" style="width:20px;height:20px">
+                    <polygon points="5,3 19,12 5,21" fill="currentColor" />
+                  </svg>
+                  <span data-i18n="btn_generate">Generate Track</span>
+                </span>
+                <span id="gen-busy" class="hidden">
+                  <span class="spin"></span>
+                  <span id="gen-label">Generating…</span>
+                </span>
+              </button>
+              <button class="btn-add-batch" id="btn-add-batch" title="Add current settings to batch queue — generates after current track finishes">
+                <svg viewBox="0 0 16 16" fill="none" width="12" height="12"><path d="M8 2v12M2 8h12" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+                <span data-i18n="btn_queue">Queue</span>
+              </button>
+            </div>
+            <div class="gen-progress-bar hidden" id="gen-progress-bar">
+              <div class="gen-progress-fill" id="gen-progress-fill"></div>
+            </div>
             <button class="btn-cancel-gen hidden" id="btn-cancel-gen" type="button"><span data-i18n="btn_cancel">Cancel</span></button>
 
             <!-- Voice clone toggle -->
@@ -497,7 +575,13 @@
 
               <!-- Track info -->
               <div class="np-info">
-                <div class="np-badge" id="np-badge" data-i18n="badge_new">NEW</div>
+                <div class="np-badge-row">
+                  <div class="np-badge" id="np-badge" data-i18n="badge_new">NEW</div>
+                  <div class="np-badge np-badge--radio hidden" id="np-radio-badge">
+                    <svg viewBox="0 0 12 12" fill="none" width="9" height="9" style="flex-shrink:0"><circle cx="6" cy="6" r="2" fill="currentColor"/><circle cx="6" cy="6" r="4.5" stroke="currentColor" stroke-width="1.2" opacity=".5"/></svg>
+                    RADIO
+                  </div>
+                </div>
                 <h2 class="np-title" id="np-title">—</h2>
                 <p class="np-meta" id="np-meta">—</p>
               </div>
@@ -650,6 +734,12 @@
                   </svg>
                   <span data-i18n="btn_save">Save</span>
                 </button>
+                <button class="np-action" id="btn-vary" title="Generate a new variation with the same settings and a different seed">
+                  <svg viewBox="0 0 20 20" fill="none">
+                    <path d="M3 7h10M3 13h10M16 5l2 2-2 2M16 11l2 2-2 2" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+                  </svg>
+                  <span data-i18n="btn_vary">Vary</span>
+                </button>
               </div>
             </div>
           </div>
@@ -664,6 +754,21 @@
             </div>
             <div class="side-card-body" id="q-body">
               <span class="side-empty" data-i18n="queue_idle">No active generation</span>
+            </div>
+          </div>
+
+          <!-- Batch Queue card -->
+          <div class="side-card" id="batch-card">
+            <div class="side-card-head">
+              <span data-i18n="batch_title">Batch Queue</span>
+              <span class="q-badge" id="batch-badge" data-i18n="batch_badge_empty">empty</span>
+            </div>
+            <div class="side-card-body" id="batch-body">
+              <span class="side-empty" id="batch-empty" data-i18n="batch_empty_hint">Queue prompts to generate one after another</span>
+              <div id="batch-list" class="batch-list"></div>
+            </div>
+            <div class="batch-card-foot hidden" id="batch-foot">
+              <button class="side-btn" id="btn-clear-batch" data-i18n="btn_clear_all">Clear all</button>
             </div>
           </div>
 
@@ -886,6 +991,9 @@
           </div>
         </div>
 
+        <!-- Per-run summary / rankings -->
+        <div class="eval-summary hidden" id="eval-summary"></div>
+
         <!-- Run button -->
         <div class="eval-run-block">
           <div class="eval-progress hidden" id="eval-progress">
@@ -958,8 +1066,21 @@
             <input type="text" id="lib-search" class="input input--mini" placeholder="Search prompts..."
               data-i18n-placeholder="lib_search_placeholder" style="width:200px" />
             <button class="btn-ghost" id="btn-refresh-lib"><span data-i18n="btn_refresh">Refresh</span></button>
-            <button class="btn-ghost" id="btn-export-csv" style="border-color:var(--green);color:var(--green)">
-              <span data-i18n="btn_export_csv">Export CSV</span>
+            <div class="export-split">
+              <button class="btn-ghost export-main-btn" id="btn-export-csv">
+                <svg viewBox="0 0 14 14" fill="none" width="12" height="12" style="flex-shrink:0"><path d="M7 1v8M4 6l3 3 3-3M2 11h10" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                <span data-i18n="btn_export">Export</span>
+              </button>
+              <select class="export-fmt-sel" id="export-format" title="Export format">
+                <option value="csv">CSV</option>
+                <option value="json">JSON</option>
+              </select>
+            </div>
+            <button class="btn-ghost btn-shuffle-lib" id="btn-shuffle-lib">
+              <svg viewBox="0 0 16 16" fill="none" width="12" height="12" style="flex-shrink:0">
+                <path d="M2 5h8M2 11h8M13 3l2 2-2 2M13 9l2 2-2 2" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
+              </svg>
+              <span data-i18n="btn_shuffle_play">Shuffle Play</span>
             </button>
           </div>
         </div>
@@ -989,6 +1110,7 @@
           <span class="lib-bulk-count" id="lib-bulk-count">0 selected</span>
           <button class="btn-ghost" id="btn-bulk-dl">↓ <span data-i18n="btn_download">Download</span></button>
           <button class="btn-ghost" id="btn-bulk-zip"><span data-i18n="btn_bulk_zip">Export ZIP</span></button>
+          <button class="btn-ghost" id="btn-bulk-csv"><span data-i18n="btn_bulk_csv">Export CSV</span></button>
           <button class="btn-ghost lib-bulk-del-btn" id="btn-bulk-del">✕ <span data-i18n="btn_bulk_del">Delete</span></button>
           <button class="btn-ghost" id="btn-bulk-deselect" data-i18n="btn_clear">Clear</button>
         </div>
@@ -1335,6 +1457,11 @@
       </div>
     </div>
     <div class="bar-right">
+      <button class="bar-action bar-action--shuffle" id="bar-shuffle" title="Shuffle / Radio mode">
+        <svg viewBox="0 0 20 20" fill="none" width="16" height="16">
+          <path d="M3 6h10M3 14h10M16 4l2 2-2 2M16 12l2 2-2 2" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+      </button>
       <button class="bar-action" id="bar-download">↓</button>
     </div>
   </div>
@@ -1360,6 +1487,42 @@
   </div>
 
 
+
+  <!-- ══ MOBILE BOTTOM NAV ════════════════════════════════════ -->
+  <nav class="mob-nav" id="mob-nav">
+    <button class="mob-nav-btn active" data-view="studio">
+      <svg viewBox="0 0 24 24" fill="none" width="22" height="22">
+        <path d="M3 9l9-7 9 7v11a2 2 0 01-2 2H5a2 2 0 01-2-2z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+      <span data-i18n="nav_studio">Studio</span>
+    </button>
+    <button class="mob-nav-btn" data-view="library">
+      <svg viewBox="0 0 24 24" fill="none" width="22" height="22">
+        <path d="M3 18V6l9 6-9 6zM15 6h6M15 12h6M15 18h6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+      <span data-i18n="nav_library">Library</span>
+    </button>
+    <button class="mob-nav-btn" data-view="voice">
+      <svg viewBox="0 0 24 24" fill="none" width="22" height="22">
+        <path d="M12 1a3 3 0 00-3 3v8a3 3 0 006 0V4a3 3 0 00-3-3z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+        <path d="M19 10v2a7 7 0 01-14 0v-2M12 19v4M8 23h8" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+      <span data-i18n="nav_voice">Voice</span>
+    </button>
+    <button class="mob-nav-btn" data-view="train">
+      <svg viewBox="0 0 24 24" fill="none" width="22" height="22">
+        <path d="M12 2L2 7l10 5 10-5-10-5z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+        <path d="M2 17l10 5 10-5M2 12l10 5 10-5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+      <span data-i18n="nav_train">Train</span>
+    </button>
+    <button class="mob-nav-btn" data-view="evaluate">
+      <svg viewBox="0 0 24 24" fill="none" width="22" height="22">
+        <path d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+      <span data-i18n="nav_evaluate">Eval</span>
+    </button>
+  </nav>
 
   <audio id="audio" crossorigin="anonymous"></audio>
   <!-- Toast notification container -->
